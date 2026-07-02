@@ -2,6 +2,7 @@ package com.example.comicreader.utils;
 
 import android.content.Context;
 import java.io.*;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,101 +23,35 @@ public class MobiParser {
             return cachedInfo;
         }
 
+        if (mobiFile.length() < 100) {
+            throw new IOException("文件太小，不是有效的MOBI文件");
+        }
+
         MobiInfo info = new MobiInfo();
 
         try (RandomAccessFile raf = new RandomAccessFile(mobiFile, "r")) {
             raf.seek(0);
-            byte[] header = new byte[64];
+            byte[] header = new byte[256];
             int bytesRead = raf.read(header);
-            if (bytesRead < 16) {
-                throw new IOException("文件太小，不是有效的MOBI文件");
+
+            if (!isValidMobiFile(header, bytesRead)) {
+                throw new IOException("不是有效的MOBI文件");
             }
 
-            String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
+            int headerType = detectHeaderType(header, bytesRead);
 
-            int palmHeaderSize = 76;
-            int mobiHeaderOffset = 76;
-
-            if (identifier.startsWith("BOOKMOBI")) {
-                palmHeaderSize = 76;
-            } else if (identifier.startsWith("MOBI") || identifier.startsWith("TEXt")) {
-                palmHeaderSize = 76;
+            if (headerType == 1) {
+                parseBookMobiFormat(raf, info);
+            } else if (headerType == 2) {
+                parsePalmDocFormat(raf, info);
+            } else if (headerType == 3) {
+                parseKf8Format(raf, info);
             } else {
-                boolean isPalmDoc = checkPalmDocHeader(header);
-                if (!isPalmDoc) {
-                    throw new IOException("不是有效的MOBI文件");
-                }
-            }
-
-            raf.seek(60);
-            int titleOffset = readInt(raf);
-            int titleLength = readInt(raf);
-
-            raf.seek(84);
-            int authorOffset = readInt(raf);
-            int authorLength = readInt(raf);
-
-            if (titleOffset > 0 && titleLength > 0 && titleOffset + titleLength <= mobiFile.length()) {
-                raf.seek(titleOffset);
-                byte[] titleBytes = new byte[titleLength];
-                raf.readFully(titleBytes);
-                info.title = new String(titleBytes, StandardCharsets.UTF_8).trim();
-            }
-
-            if (authorOffset > 0 && authorLength > 0 && authorOffset + authorLength <= mobiFile.length()) {
-                raf.seek(authorOffset);
-                byte[] authorBytes = new byte[authorLength];
-                raf.readFully(authorBytes);
-                info.author = new String(authorBytes, StandardCharsets.UTF_8).trim();
-            }
-
-            raf.seek(12);
-            int numSections = readShort(raf);
-
-            int textOffset = 0;
-            int textLength = 0;
-
-            for (int i = 0; i < numSections; i++) {
-                int sectionOffsetPos = palmHeaderSize + i * 8;
-                if (sectionOffsetPos + 8 > mobiFile.length()) break;
-                raf.seek(sectionOffsetPos);
-                int sectionOffset = readInt(raf);
-                int sectionType = readInt(raf);
-
-                if (i == 0) {
-                    textOffset = sectionOffset;
-                }
-            }
-
-            if (textOffset > 0 && textOffset < mobiFile.length()) {
-                raf.seek(textOffset);
-                int record0Size = 0;
-                if (numSections > 1) {
-                    int nextOffsetPos = palmHeaderSize + 8;
-                    if (nextOffsetPos + 4 <= mobiFile.length()) {
-                        raf.seek(nextOffsetPos);
-                        int nextOffset = readInt(raf);
-                        record0Size = nextOffset - textOffset;
-                    }
-                } else {
-                    record0Size = (int) (mobiFile.length() - textOffset);
-                }
-
-                if (record0Size > 0 && record0Size < 10 * 1024 * 1024) {
-                    if (textOffset + record0Size > mobiFile.length()) {
-                        record0Size = (int) (mobiFile.length() - textOffset);
-                    }
-                    raf.seek(textOffset);
-                    byte[] textBytes = new byte[record0Size];
-                    raf.readFully(textBytes);
-
-                    String content = decodeMobiText(textBytes);
-                    info.chapters = extractChapters(content);
-                }
+                parseGenericFormat(raf, info);
             }
 
             if (info.chapters.isEmpty()) {
-                extractTextFromRecords(raf, numSections, palmHeaderSize, info);
+                extractTextFromAllRecords(raf, info);
             }
 
             info.totalPages = info.chapters.size();
@@ -134,54 +69,233 @@ public class MobiParser {
         return info;
     }
 
-    private boolean checkPalmDocHeader(byte[] header) {
-        if (header.length < 32) return false;
+    private boolean isValidMobiFile(byte[] header, int bytesRead) {
+        if (bytesRead < 16) return false;
 
-        int version = (header[0] & 0xFF) << 8 | (header[1] & 0xFF);
-        int creationDate = (header[2] & 0xFF) << 24 | (header[3] & 0xFF) << 16 |
-                           (header[4] & 0xFF) << 8 | (header[5] & 0xFF);
+        String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
 
-        int dbType = (header[32] & 0xFF) << 24 | (header[33] & 0xFF) << 16 |
-                     (header[34] & 0xFF) << 8 | (header[35] & 0xFF);
+        if (identifier.startsWith("BOOKMOBI")) return true;
+        if (identifier.startsWith("MOBI")) return true;
+        if (identifier.startsWith("TEXt")) return true;
 
-        int creator = (header[36] & 0xFF) << 24 | (header[37] & 0xFF) << 16 |
-                      (header[38] & 0xFF) << 8 | (header[39] & 0xFF);
+        if (bytesRead >= 40) {
+            int dbType = (header[32] & 0xFF) << 24 | (header[33] & 0xFF) << 16 |
+                         (header[34] & 0xFF) << 8 | (header[35] & 0xFF);
+            int creator = (header[36] & 0xFF) << 24 | (header[37] & 0xFF) << 16 |
+                          (header[38] & 0xFF) << 8 | (header[39] & 0xFF);
 
-        return (dbType == 0x4D4F4249 || dbType == 0x54455874 ||
-                creator == 0x4B494E44 || creator == 0x4D4F4249);
+            if (dbType == 0x4D4F4249 || dbType == 0x54455874) return true;
+            if (creator == 0x4B494E44 || creator == 0x4D4F4249) return true;
+            if (creator == 0x414D415A || creator == 0x4B465820) return true;
+        }
+
+        if (bytesRead >= 16) {
+            int magic = (header[0] & 0xFF) << 24 | (header[1] & 0xFF) << 16 |
+                        (header[2] & 0xFF) << 8 | (header[3] & 0xFF);
+            if (magic == 0x4D4F4249) return true;
+            if (magic == 0x504B0304) return true;
+        }
+
+        return false;
     }
 
-    private String decodeMobiText(byte[] data) {
+    private int detectHeaderType(byte[] header, int bytesRead) {
+        String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
+
+        if (identifier.startsWith("BOOKMOBI")) return 1;
+
+        if (bytesRead >= 40) {
+            int creator = (header[36] & 0xFF) << 24 | (header[37] & 0xFF) << 16 |
+                          (header[38] & 0xFF) << 8 | (header[39] & 0xFF);
+            if (creator == 0x4B465820) return 3;
+        }
+
+        if (bytesRead >= 16) {
+            int magic = (header[0] & 0xFF) << 24 | (header[1] & 0xFF) << 16 |
+                        (header[2] & 0xFF) << 8 | (header[3] & 0xFF);
+            if (magic == 0x504B0304) return 3;
+        }
+
+        return 2;
+    }
+
+    private void parseBookMobiFormat(RandomAccessFile raf, MobiInfo info) throws IOException {
         try {
-            return new String(data, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            try {
-                return new String(data, "ISO-8859-1");
-            } catch (Exception e2) {
-                return new String(data);
+            raf.seek(60);
+            int titleOffset = readIntBE(raf);
+            int titleLength = readIntBE(raf);
+
+            raf.seek(84);
+            int authorOffset = readIntBE(raf);
+            int authorLength = readIntBE(raf);
+
+            if (titleOffset > 0 && titleLength > 0 && titleOffset + titleLength <= mobiFile.length()) {
+                raf.seek(titleOffset);
+                byte[] titleBytes = new byte[titleLength];
+                raf.readFully(titleBytes);
+                info.title = decodeString(titleBytes).trim();
             }
+
+            if (authorOffset > 0 && authorLength > 0 && authorOffset + authorLength <= mobiFile.length()) {
+                raf.seek(authorOffset);
+                byte[] authorBytes = new byte[authorLength];
+                raf.readFully(authorBytes);
+                info.author = decodeString(authorBytes).trim();
+            }
+
+            raf.seek(12);
+            int numSections = readShortBE(raf);
+
+            int textOffset = 0;
+            for (int i = 0; i < numSections; i++) {
+                int pos = 76 + i * 8;
+                if (pos + 8 > mobiFile.length()) break;
+                raf.seek(pos);
+                int offset = readIntBE(raf);
+                int type = readIntBE(raf);
+                if (i == 0) textOffset = offset;
+            }
+
+            if (textOffset > 0 && textOffset < mobiFile.length()) {
+                extractTextFromOffset(raf, textOffset, info);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
-    private void extractTextFromRecords(RandomAccessFile raf, int numSections, int palmHeaderSize, MobiInfo info) {
+    private void parsePalmDocFormat(RandomAccessFile raf, MobiInfo info) throws IOException {
         try {
+            int nameOffset = (raf.readByte() & 0xFF) << 8 | (raf.readByte() & 0xFF);
+
+            raf.seek(32);
+            int dbType = readIntBE(raf);
+            int creator = readIntBE(raf);
+
+            if (nameOffset > 0 && nameOffset < mobiFile.length()) {
+                raf.seek(nameOffset);
+                byte[] nameBytes = new byte[32];
+                raf.readFully(nameBytes);
+                String dbName = new String(nameBytes, StandardCharsets.US_ASCII).trim();
+                if (info.title.isEmpty()) {
+                    info.title = dbName;
+                }
+            }
+
+            raf.seek(76);
+            int textOffset = readIntBE(raf);
+            int numRecords = readIntBE(raf);
+
+            if (textOffset > 0 && textOffset < mobiFile.length()) {
+                extractTextFromOffset(raf, textOffset, info);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void parseKf8Format(RandomAccessFile raf, MobiInfo info) throws IOException {
+        try {
+            raf.seek(0);
+            byte[] localHeader = new byte[30];
+            raf.readFully(localHeader);
+
+            int fileNameLength = (localHeader[26] & 0xFF) | ((localHeader[27] & 0xFF) << 8);
+            int extraFieldLength = (localHeader[28] & 0xFF) | ((localHeader[29] & 0xFF) << 8);
+
+            int fileDataOffset = 30 + fileNameLength + extraFieldLength;
+            if (fileDataOffset > mobiFile.length()) {
+                parseGenericFormat(raf, info);
+                return;
+            }
+
+            raf.seek(fileDataOffset);
+            byte[] contentStart = new byte[8];
+            raf.readFully(contentStart);
+
+            String contentId = new String(contentStart, StandardCharsets.US_ASCII).trim();
+            if (contentId.startsWith("MOBI")) {
+                parseBookMobiFormat(raf, info);
+            } else {
+                extractTextFromOffset(raf, fileDataOffset, info);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            parseGenericFormat(raf, info);
+        }
+    }
+
+    private void parseGenericFormat(RandomAccessFile raf, MobiInfo info) throws IOException {
+        try {
+            raf.seek(0);
+            byte[] buffer = new byte[(int) Math.min(mobiFile.length(), 64 * 1024)];
+            raf.readFully(buffer);
+
+            String content = decodeString(buffer);
+            content = cleanContent(content);
+
+            if (content.length() > 100) {
+                info.chapters = extractChapters(content);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void extractTextFromOffset(RandomAccessFile raf, int offset, MobiInfo info) {
+        try {
+            if (offset <= 0 || offset >= mobiFile.length()) return;
+
+            raf.seek(offset);
+            int remaining = (int) (mobiFile.length() - offset);
+            if (remaining > 10 * 1024 * 1024) remaining = 10 * 1024 * 1024;
+
+            byte[] data = new byte[remaining];
+            raf.readFully(data);
+
+            String content = decodeString(data);
+            content = cleanContent(content);
+
+            if (content.length() > 100) {
+                info.chapters = extractChapters(content);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void extractTextFromAllRecords(RandomAccessFile raf, MobiInfo info) {
+        try {
+            raf.seek(0);
+            byte[] header = new byte[128];
+            raf.readFully(header);
+
+            int numSections = readShortBE(new ByteArrayInputStream(header), 12);
+            int firstSectionOffset = readIntBE(new ByteArrayInputStream(header), 76);
+
+            if (firstSectionOffset <= 0 || firstSectionOffset >= mobiFile.length()) {
+                extractRawText(raf, info);
+                return;
+            }
+
             StringBuilder fullContent = new StringBuilder();
 
-            for (int i = 0; i < numSections; i++) {
-                int sectionOffsetPos = palmHeaderSize + i * 8;
-                if (sectionOffsetPos + 8 > mobiFile.length()) break;
-                raf.seek(sectionOffsetPos);
-                int sectionOffset = readInt(raf);
-                int sectionType = readInt(raf);
+            for (int i = 0; i < Math.min(numSections, 200); i++) {
+                int offsetPos = 76 + i * 8;
+                if (offsetPos + 8 > mobiFile.length()) break;
 
-                if (sectionOffset <= 0) continue;
+                raf.seek(offsetPos);
+                int offset = readIntBE(raf);
+                int type = readIntBE(raf);
+
+                if (offset <= 0) continue;
 
                 int nextOffset;
                 if (i + 1 < numSections) {
-                    int nextOffsetPos = palmHeaderSize + (i + 1) * 8;
-                    if (nextOffsetPos + 4 <= mobiFile.length()) {
-                        raf.seek(nextOffsetPos);
-                        nextOffset = readInt(raf);
+                    int nextPos = 76 + (i + 1) * 8;
+                    if (nextPos + 4 <= mobiFile.length()) {
+                        raf.seek(nextPos);
+                        nextOffset = readIntBE(raf);
                     } else {
                         nextOffset = (int) mobiFile.length();
                     }
@@ -189,32 +303,120 @@ public class MobiParser {
                     nextOffset = (int) mobiFile.length();
                 }
 
-                int recordSize = nextOffset - sectionOffset;
-                if (recordSize <= 0 || recordSize > 1024 * 1024) continue;
+                int size = nextOffset - offset;
+                if (size <= 0 || size > 512 * 1024) continue;
 
-                raf.seek(sectionOffset);
-                byte[] recordData = new byte[recordSize];
+                if (offset + size > mobiFile.length()) {
+                    size = (int) (mobiFile.length() - offset);
+                }
+
+                raf.seek(offset);
+                byte[] recordData = new byte[size];
                 raf.readFully(recordData);
 
-                String recordText = decodeMobiText(recordData);
-                fullContent.append(recordText);
-                fullContent.append("\n");
+                String text = decodeString(recordData);
+                text = cleanContent(text);
+
+                if (text.length() > 50) {
+                    fullContent.append(text);
+                    fullContent.append("\n\n");
+                }
             }
 
-            if (fullContent.length() > 0) {
+            if (fullContent.length() > 100) {
                 info.chapters = extractChapters(fullContent.toString());
+            } else {
+                extractRawText(raf, info);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            extractRawText(raf, info);
+        }
+    }
+
+    private void extractRawText(RandomAccessFile raf, MobiInfo info) {
+        try {
+            raf.seek(0);
+            byte[] buffer = new byte[(int) Math.min(mobiFile.length(), 2 * 1024 * 1024)];
+            int bytesRead = raf.read(buffer);
+
+            String content = decodeString(buffer);
+            content = cleanContent(content);
+
+            if (content.length() > 100) {
+                info.chapters = extractChapters(content);
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
+    private String decodeString(byte[] data) {
+        try {
+            return new String(data, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            try {
+                return new String(data, "GBK");
+            } catch (Exception e2) {
+                try {
+                    return new String(data, "GB2312");
+                } catch (Exception e3) {
+                    try {
+                        return new String(data, "ISO-8859-1");
+                    } catch (Exception e4) {
+                        return new String(data);
+                    }
+                }
+            }
+        }
+    }
+
+    private String cleanContent(String content) {
+        if (content == null) return "";
+
+        content = content.replaceAll("\\u0000", "");
+        content = content.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", "");
+        content = content.replaceAll("\\r\\n", "\n");
+        content = content.replaceAll("\\r", "\n");
+        content = content.replaceAll("(?s)\\<script[^>]*>.*?</script\\>", "");
+        content = content.replaceAll("(?s)\\<style[^>]*>.*?</style\\>", "");
+        content = content.replaceAll("(?s)\\<![^>]*\\>", "");
+        content = content.replaceAll("<br\\s*/?>", "\n");
+        content = content.replaceAll("</p>", "\n\n");
+        content = content.replaceAll("<[^>]*>", "");
+        content = content.replaceAll("&nbsp;", " ");
+        content = content.replaceAll("&amp;", "&");
+        content = content.replaceAll("&lt;", "<");
+        content = content.replaceAll("&gt;", ">");
+        content = content.replaceAll("&quot;", "\"");
+        content = content.replaceAll("&#\\d+;", " ");
+        content = content.replaceAll("&[a-zA-Z]+;", " ");
+
+        StringBuilder cleaned = new StringBuilder();
+        boolean inWhitespace = false;
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            if (Character.isWhitespace(c)) {
+                if (!inWhitespace) {
+                    cleaned.append(' ');
+                    inWhitespace = true;
+                }
+            } else {
+                cleaned.append(c);
+                inWhitespace = false;
+            }
+        }
+
+        return cleaned.toString().trim();
+    }
+
     private List<String> extractChapters(String content) {
         List<String> chapters = new ArrayList<>();
 
-        content = stripHtmlTags(content);
-        content = content.replaceAll("\\r\\n", "\n");
-        content = content.replaceAll("\\r", "\n");
+        if (content == null || content.isEmpty()) {
+            chapters.add("<p>暂无内容</p>");
+            return chapters;
+        }
 
         String[] paragraphs = content.split("\n\n+");
         StringBuilder currentChapter = new StringBuilder();
@@ -224,6 +426,7 @@ public class MobiParser {
         for (String para : paragraphs) {
             para = para.trim();
             if (para.isEmpty()) continue;
+            if (para.length() < 3) continue;
 
             if (charCount + para.length() > chapterSize && charCount > 0) {
                 chapters.add(currentChapter.toString());
@@ -246,20 +449,8 @@ public class MobiParser {
         return chapters;
     }
 
-    private String stripHtmlTags(String html) {
-        if (html == null) return "";
-        html = html.replaceAll("<br\\s*/?>", "\n");
-        html = html.replaceAll("</p>", "\n\n");
-        html = html.replaceAll("<[^>]*>", "");
-        html = html.replaceAll("&nbsp;", " ");
-        html = html.replaceAll("&amp;", "&");
-        html = html.replaceAll("&lt;", "<");
-        html = html.replaceAll("&gt;", ">");
-        html = html.replaceAll("&quot;", "\"");
-        return html.trim();
-    }
-
     private String escapeHtml(String text) {
+        if (text == null) return "";
         text = text.replace("&", "&amp;");
         text = text.replace("<", "&lt;");
         text = text.replace(">", "&gt;");
@@ -341,16 +532,37 @@ public class MobiParser {
         return -1;
     }
 
-    private int readShort(RandomAccessFile raf) throws IOException {
+    private int readShortBE(RandomAccessFile raf) throws IOException {
         byte[] bytes = new byte[2];
         raf.readFully(bytes);
         return (bytes[0] & 0xFF) << 8 | (bytes[1] & 0xFF);
     }
 
-    private int readInt(RandomAccessFile raf) throws IOException {
+    private int readIntBE(RandomAccessFile raf) throws IOException {
         byte[] bytes = new byte[4];
         raf.readFully(bytes);
-        return (bytes[0] & 0xFF) << 24 | (bytes[1] & 0xFF) << 16 | (bytes[2] & 0xFF) << 8 | (bytes[3] & 0xFF);
+        return (bytes[0] & 0xFF) << 24 | (bytes[1] & 0xFF) << 16 |
+               (bytes[2] & 0xFF) << 8 | (bytes[3] & 0xFF);
+    }
+
+    private int readShortBE(InputStream is, int offset) throws IOException {
+        is.mark(offset + 2);
+        is.skip(offset);
+        int b1 = is.read() & 0xFF;
+        int b2 = is.read() & 0xFF;
+        is.reset();
+        return b1 << 8 | b2;
+    }
+
+    private int readIntBE(InputStream is, int offset) throws IOException {
+        is.mark(offset + 4);
+        is.skip(offset);
+        int b1 = is.read() & 0xFF;
+        int b2 = is.read() & 0xFF;
+        int b3 = is.read() & 0xFF;
+        int b4 = is.read() & 0xFF;
+        is.reset();
+        return b1 << 24 | b2 << 16 | b3 << 8 | b4;
     }
 
     public String getChapterContent(int chapterIndex) throws IOException {
