@@ -24,7 +24,7 @@ import java.util.List;
 
 public class UpdateChecker {
     private static final String VERSION_URL_GITHUB = "https://raw.githubusercontent.com/sxr7749/ComicReader/master/version.json";
-    private static final String VERSION_URL_GITEEMIRROR = "https://gitee.com/sxr7749/ComicReader/raw/master/version.json";
+    private static final String VERSION_URL_GITEEMIRROR = "https://gitee.com/demon-subduer/comic-reader/raw/master/version.json";
     private static final List<String> VERSION_URLS = Arrays.asList(VERSION_URL_GITHUB, VERSION_URL_GITEEMIRROR);
 
     public interface OnUpdateCheckListener {
