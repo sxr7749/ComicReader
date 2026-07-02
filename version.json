@@ -1,0 +1,7 @@
+{
+    "versionCode": 2,
+    "versionName": "1.1.6",
+    "downloadUrl": "https://github.com/sxr7749/ComicReader/releases/download/v1.1.6/app-release.apk",
+    "updateLog": "- 新增版本更新功能\n- 支持PDF/TXT/EPUB/MOBI等多种格式\n- 优化阅读体验\n- 修复已知Bug",
+    "forceUpdate": false
+}
