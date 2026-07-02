@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="categories">
+        <item>国漫</item>
+        <item>韩漫</item>
+        <item>港漫</item>
+        <item>日漫</item>
+        <item>其他</item>
+    </string-array>
+
+    <string-array name="genres">
+        <item>玄幻</item>
+        <item>诡秘</item>
+        <item>武侠</item>
+        <item>修仙</item>
+        <item>末世</item>
+        <item>后宫</item>
+        <item>系统</item>
+        <item>穿越</item>
+        <item>校园</item>
+        <item>悬疑</item>
+        <item>恋爱</item>
+        <item>TL</item>
+        <item>BL</item>
+        <item>BG</item>
+        <item>未分类</item>
+    </string-array>
+</resources>

@@ -1,0 +1,5 @@
+-keep class com.example.comicreader.** { *; }
+-keep class com.google.gson.** { *; }
+-keep class com.bumptech.glide.** { *; }
+-keep class org.readium.** { *; }
+-keep class com.itextpdf.** { *; }

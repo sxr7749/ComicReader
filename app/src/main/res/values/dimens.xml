@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="page_spacing">4dp</dimen>
+    <dimen name="progress_indicator_width">36dp</dimen>
+    <dimen name="progress_indicator_height">56dp</dimen>
+    <dimen name="divider_height">1dp</dimen>
+</resources>
