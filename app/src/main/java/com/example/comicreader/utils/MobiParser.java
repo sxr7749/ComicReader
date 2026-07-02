@@ -26,12 +26,26 @@ public class MobiParser {
 
         try (RandomAccessFile raf = new RandomAccessFile(mobiFile, "r")) {
             raf.seek(0);
-            byte[] header = new byte[16];
-            raf.readFully(header);
+            byte[] header = new byte[64];
+            int bytesRead = raf.read(header);
+            if (bytesRead < 16) {
+                throw new IOException("文件太小，不是有效的MOBI文件");
+            }
 
-            String identifier = new String(header, 0, 6, StandardCharsets.US_ASCII);
-            if (!"BOOKMOBI".equals(identifier)) {
-                throw new IOException("不是有效的MOBI文件");
+            String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
+
+            int palmHeaderSize = 76;
+            int mobiHeaderOffset = 76;
+
+            if (identifier.startsWith("BOOKMOBI")) {
+                palmHeaderSize = 76;
+            } else if (identifier.startsWith("MOBI") || identifier.startsWith("TEXt")) {
+                palmHeaderSize = 76;
+            } else {
+                boolean isPalmDoc = checkPalmDocHeader(header);
+                if (!isPalmDoc) {
+                    throw new IOException("不是有效的MOBI文件");
+                }
             }
 
             raf.seek(60);
@@ -42,14 +56,14 @@ public class MobiParser {
             int authorOffset = readInt(raf);
             int authorLength = readInt(raf);
 
-            if (titleOffset > 0 && titleLength > 0) {
+            if (titleOffset > 0 && titleLength > 0 && titleOffset + titleLength <= mobiFile.length()) {
                 raf.seek(titleOffset);
                 byte[] titleBytes = new byte[titleLength];
                 raf.readFully(titleBytes);
                 info.title = new String(titleBytes, StandardCharsets.UTF_8).trim();
             }
 
-            if (authorOffset > 0 && authorLength > 0) {
+            if (authorOffset > 0 && authorLength > 0 && authorOffset + authorLength <= mobiFile.length()) {
                 raf.seek(authorOffset);
                 byte[] authorBytes = new byte[authorLength];
                 raf.readFully(authorBytes);
@@ -63,7 +77,9 @@ public class MobiParser {
             int textLength = 0;
 
             for (int i = 0; i < numSections; i++) {
-                raf.seek(76 + i * 8);
+                int sectionOffsetPos = palmHeaderSize + i * 8;
+                if (sectionOffsetPos + 8 > mobiFile.length()) break;
+                raf.seek(sectionOffsetPos);
                 int sectionOffset = readInt(raf);
                 int sectionType = readInt(raf);
 
@@ -72,24 +88,35 @@ public class MobiParser {
                 }
             }
 
-            if (textOffset > 0) {
+            if (textOffset > 0 && textOffset < mobiFile.length()) {
                 raf.seek(textOffset);
                 int record0Size = 0;
                 if (numSections > 1) {
-                    raf.seek(76 + 8);
-                    int nextOffset = readInt(raf);
-                    record0Size = nextOffset - textOffset;
+                    int nextOffsetPos = palmHeaderSize + 8;
+                    if (nextOffsetPos + 4 <= mobiFile.length()) {
+                        raf.seek(nextOffsetPos);
+                        int nextOffset = readInt(raf);
+                        record0Size = nextOffset - textOffset;
+                    }
                 } else {
                     record0Size = (int) (mobiFile.length() - textOffset);
                 }
 
-                if (record0Size > 0 && record0Size < 1024 * 1024) {
+                if (record0Size > 0 && record0Size < 10 * 1024 * 1024) {
+                    if (textOffset + record0Size > mobiFile.length()) {
+                        record0Size = (int) (mobiFile.length() - textOffset);
+                    }
                     raf.seek(textOffset);
                     byte[] textBytes = new byte[record0Size];
                     raf.readFully(textBytes);
-                    String content = new String(textBytes, StandardCharsets.UTF_8);
+
+                    String content = decodeMobiText(textBytes);
                     info.chapters = extractChapters(content);
                 }
+            }
+
+            if (info.chapters.isEmpty()) {
+                extractTextFromRecords(raf, numSections, palmHeaderSize, info);
             }
 
             info.totalPages = info.chapters.size();
@@ -105,6 +132,81 @@ public class MobiParser {
         cachedInfo = info;
         parsed = true;
         return info;
+    }
+
+    private boolean checkPalmDocHeader(byte[] header) {
+        if (header.length < 32) return false;
+
+        int version = (header[0] & 0xFF) << 8 | (header[1] & 0xFF);
+        int creationDate = (header[2] & 0xFF) << 24 | (header[3] & 0xFF) << 16 |
+                           (header[4] & 0xFF) << 8 | (header[5] & 0xFF);
+
+        int dbType = (header[32] & 0xFF) << 24 | (header[33] & 0xFF) << 16 |
+                     (header[34] & 0xFF) << 8 | (header[35] & 0xFF);
+
+        int creator = (header[36] & 0xFF) << 24 | (header[37] & 0xFF) << 16 |
+                      (header[38] & 0xFF) << 8 | (header[39] & 0xFF);
+
+        return (dbType == 0x4D4F4249 || dbType == 0x54455874 ||
+                creator == 0x4B494E44 || creator == 0x4D4F4249);
+    }
+
+    private String decodeMobiText(byte[] data) {
+        try {
+            return new String(data, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            try {
+                return new String(data, "ISO-8859-1");
+            } catch (Exception e2) {
+                return new String(data);
+            }
+        }
+    }
+
+    private void extractTextFromRecords(RandomAccessFile raf, int numSections, int palmHeaderSize, MobiInfo info) {
+        try {
+            StringBuilder fullContent = new StringBuilder();
+
+            for (int i = 0; i < numSections; i++) {
+                int sectionOffsetPos = palmHeaderSize + i * 8;
+                if (sectionOffsetPos + 8 > mobiFile.length()) break;
+                raf.seek(sectionOffsetPos);
+                int sectionOffset = readInt(raf);
+                int sectionType = readInt(raf);
+
+                if (sectionOffset <= 0) continue;
+
+                int nextOffset;
+                if (i + 1 < numSections) {
+                    int nextOffsetPos = palmHeaderSize + (i + 1) * 8;
+                    if (nextOffsetPos + 4 <= mobiFile.length()) {
+                        raf.seek(nextOffsetPos);
+                        nextOffset = readInt(raf);
+                    } else {
+                        nextOffset = (int) mobiFile.length();
+                    }
+                } else {
+                    nextOffset = (int) mobiFile.length();
+                }
+
+                int recordSize = nextOffset - sectionOffset;
+                if (recordSize <= 0 || recordSize > 1024 * 1024) continue;
+
+                raf.seek(sectionOffset);
+                byte[] recordData = new byte[recordSize];
+                raf.readFully(recordData);
+
+                String recordText = decodeMobiText(recordData);
+                fullContent.append(recordText);
+                fullContent.append("\n");
+            }
+
+            if (fullContent.length() > 0) {
+                info.chapters = extractChapters(fullContent.toString());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private List<String> extractChapters(String content) {

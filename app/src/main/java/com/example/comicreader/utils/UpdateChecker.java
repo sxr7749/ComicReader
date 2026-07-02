@@ -19,9 +19,13 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Arrays;
+import java.util.List;
 
 public class UpdateChecker {
-    private static final String VERSION_URL = "https://raw.githubusercontent.com/sxr7749/ComicReader/master/version.json";
+    private static final String VERSION_URL_GITHUB = "https://raw.githubusercontent.com/sxr7749/ComicReader/master/version.json";
+    private static final String VERSION_URL_GITEEMIRROR = "https://gitee.com/sxr7749/ComicReader/raw/master/version.json";
+    private static final List<String> VERSION_URLS = Arrays.asList(VERSION_URL_GITHUB, VERSION_URL_GITEEMIRROR);
 
     public interface OnUpdateCheckListener {
         void onUpdateAvailable(UpdateInfo updateInfo);
@@ -33,40 +37,51 @@ public class UpdateChecker {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                try {
-                    URL url = new URL(VERSION_URL);
-                    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                    connection.setConnectTimeout(10000);
-                    connection.setReadTimeout(10000);
-                    connection.setRequestMethod("GET");
+                Exception lastException = null;
+                
+                for (String urlStr : VERSION_URLS) {
+                    try {
+                        URL url = new URL(urlStr);
+                        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                        connection.setConnectTimeout(8000);
+                        connection.setReadTimeout(8000);
+                        connection.setRequestMethod("GET");
+                        connection.setRequestProperty("User-Agent", "ComicReader/1.0");
 
-                    int responseCode = connection.getResponseCode();
-                    if (responseCode == HttpURLConnection.HTTP_OK) {
-                        InputStream inputStream = connection.getInputStream();
-                        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
-                        StringBuilder sb = new StringBuilder();
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            sb.append(line);
+                        int responseCode = connection.getResponseCode();
+                        if (responseCode == HttpURLConnection.HTTP_OK) {
+                            InputStream inputStream = connection.getInputStream();
+                            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, "UTF-8"));
+                            StringBuilder sb = new StringBuilder();
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                sb.append(line);
+                            }
+                            reader.close();
+                            inputStream.close();
+
+                            Gson gson = new Gson();
+                            UpdateInfo updateInfo = gson.fromJson(sb.toString(), UpdateInfo.class);
+
+                            int currentVersionCode = getCurrentVersionCode(context);
+                            if (updateInfo.getVersionCode() > currentVersionCode) {
+                                listener.onUpdateAvailable(updateInfo);
+                            } else {
+                                listener.onNoUpdate();
+                            }
+                            connection.disconnect();
+                            return;
                         }
-                        reader.close();
-                        inputStream.close();
-
-                        Gson gson = new Gson();
-                        UpdateInfo updateInfo = gson.fromJson(sb.toString(), UpdateInfo.class);
-
-                        int currentVersionCode = getCurrentVersionCode(context);
-                        if (updateInfo.getVersionCode() > currentVersionCode) {
-                            listener.onUpdateAvailable(updateInfo);
-                        } else {
-                            listener.onNoUpdate();
-                        }
-                    } else {
-                        listener.onError("服务器返回错误: " + responseCode);
+                        connection.disconnect();
+                    } catch (Exception e) {
+                        lastException = e;
                     }
-                    connection.disconnect();
-                } catch (Exception e) {
-                    listener.onError("检查更新失败: " + e.getMessage());
+                }
+
+                if (lastException != null) {
+                    listener.onError("检查更新失败: " + lastException.getMessage());
+                } else {
+                    listener.onError("检查更新失败: 无法连接到服务器");
                 }
             }
         }).start();
@@ -132,6 +147,5 @@ public class UpdateChecker {
     }
 
     public static void setVersionUrl(@NonNull String url) {
-        // For testing or custom deployment
     }
 }
