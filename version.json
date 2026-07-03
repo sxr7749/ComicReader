@@ -1,6 +1,6 @@
 {
     "versionCode": 3,
-    "versionName": "1.2.0",
+    "versionName": "1.1.8",
     "downloadUrl": "https://github.com/sxr7749/ComicReader/releases/download/v1.1.8/v1.1.8.apk",
     "updateLog": "- 新增版本更新功能\n- 修复阅读卡顿问题\n- 优化PDF渲染性能",
     "forceUpdate": false
