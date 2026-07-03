@@ -1,7 +1,7 @@
 {
-    "versionCode": 3,
-    "versionName": "1.1.8",
-    "downloadUrl": "https://gitee.com/demon-subduer/comic-reader/releases/download/v1.1.8/%E9%9B%86%E6%BC%AB%E9%98%85%E8%AF%BB%E5%99%A8v1.1.8.apk",
-    "updateLog": "- EPUB阅读器修复：修复章节内容显示不完整问题，添加目录功能，进度条实时同步\n- 侧边栏功能：实现左侧可展开收纳的侧边栏，分类标签和排序功能移到侧边栏，添加深色/浅色模式快捷切换按钮\n- 布局调整：设置按钮移到左下角，展开收纳按钮移到工具栏右侧",
+    "versionCode": 4,
+    "versionName": "1.1.9",
+    "downloadUrl": "https://gitee.com/demon-subduer/comic-reader/releases/download/v1.1.9/%E9%9B%86%E6%BC%AB%E9%98%85%E8%AF%BB%E5%99%A8v1.1.9.apk",
+    "updateLog": "- 修复版本更新提示重复弹出问题\n- 设置页面显示当前版本号\n- 优化更新检查机制，添加防抖和间隔检查",
     "forceUpdate": false
 }
