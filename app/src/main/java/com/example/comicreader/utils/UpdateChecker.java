@@ -27,6 +27,11 @@ public class UpdateChecker {
     private static final String VERSION_URL_GITEEMIRROR = "https://gitee.com/demon-subduer/comic-reader/raw/master/version.json";
     private static final List<String> VERSION_URLS = Arrays.asList(VERSION_URL_GITHUB, VERSION_URL_GITEEMIRROR);
 
+    private static boolean isChecking = false;
+    private static boolean hasShownUpdate = false;
+    private static long lastCheckTime = 0;
+    private static final long CHECK_INTERVAL = 24 * 60 * 60 * 1000L;
+
     public interface OnUpdateCheckListener {
         void onUpdateAvailable(UpdateInfo updateInfo);
         void onNoUpdate();
@@ -34,6 +39,23 @@ public class UpdateChecker {
     }
 
     public static void checkForUpdate(final Context context, final OnUpdateCheckListener listener) {
+        checkForUpdate(context, listener, false);
+    }
+
+    public static void checkForUpdate(final Context context, final OnUpdateCheckListener listener, boolean forceCheck) {
+        if (!forceCheck) {
+            long now = System.currentTimeMillis();
+            if (isChecking) {
+                return;
+            }
+            if (now - lastCheckTime < CHECK_INTERVAL) {
+                return;
+            }
+        }
+
+        isChecking = true;
+        lastCheckTime = System.currentTimeMillis();
+
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -65,11 +87,15 @@ public class UpdateChecker {
 
                             int currentVersionCode = getCurrentVersionCode(context);
                             if (updateInfo.getVersionCode() > currentVersionCode) {
-                                listener.onUpdateAvailable(updateInfo);
+                                if (!hasShownUpdate || forceCheck) {
+                                    hasShownUpdate = true;
+                                    listener.onUpdateAvailable(updateInfo);
+                                }
                             } else {
                                 listener.onNoUpdate();
                             }
                             connection.disconnect();
+                            isChecking = false;
                             return;
                         }
                         connection.disconnect();
@@ -78,6 +104,7 @@ public class UpdateChecker {
                     }
                 }
 
+                isChecking = false;
                 if (lastException != null) {
                     listener.onError("检查更新失败: " + lastException.getMessage());
                 } else {

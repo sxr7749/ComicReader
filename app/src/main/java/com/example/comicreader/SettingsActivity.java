@@ -223,6 +223,9 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void setupCheckUpdateButton() {
+        TextView versionText = findViewById(R.id.tv_current_version);
+        versionText.setText("v" + UpdateChecker.getCurrentVersionName(this));
+
         findViewById(R.id.btn_check_update).setOnClickListener(v -> {
             UpdateChecker.checkForUpdate(this, new UpdateChecker.OnUpdateCheckListener() {
                 @Override
@@ -249,7 +252,7 @@ public class SettingsActivity extends AppCompatActivity {
                                 com.google.android.material.snackbar.Snackbar.LENGTH_SHORT).show();
                     });
                 }
-            });
+            }, true);
         });
     }
 
