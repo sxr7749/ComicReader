@@ -1,6 +1,6 @@
 {
     "versionCode": 2,
-    "versionName": "1.1.6",
+    "versionName": "1.1.8",
     "downloadUrl": "https://gitee.com/demon-subduer/comic-reader/releases/download/v1.1.8/%E9%9B%86%E6%BC%AB%E9%98%85%E8%AF%BB%E5%99%A8v1.1.8.apk",
     "updateLog": "- 新增版本更新功能\n- 支持PDF/TXT/EPUB/MOBI等多种格式\n- 优化阅读体验\n- 修复已知Bug",
     "forceUpdate": false
