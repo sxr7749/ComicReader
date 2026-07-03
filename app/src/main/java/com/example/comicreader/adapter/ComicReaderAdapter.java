@@ -55,13 +55,9 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
         if ("epub".equals(type)) {
             epubParser = new EpubParser(file, context);
             try {
-                epubParser.parse();
-                java.util.List<String> imgPaths = epubParser.getImagePaths();
-                if (imgPaths != null && !imgPaths.isEmpty()) {
-                    imageFiles = new java.util.ArrayList<>();
-                    for (String path : imgPaths) {
-                        imageFiles.add(new File(path));
-                    }
+                EpubParser.EpubInfo info = epubParser.parse();
+                if (info != null && info.totalPages > 0) {
+                    comic.setTotalPages(info.totalPages);
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -69,7 +65,17 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
         } else if ("mobi".equals(type)) {
             mobiParser = new MobiParser(file, context);
             try {
-                mobiParser.parse();
+                MobiParser.MobiInfo info = mobiParser.parse();
+                if (info != null && info.totalPages > 0) {
+                    comic.setTotalPages(info.totalPages);
+                }
+                java.util.List<String> imgPaths = mobiParser.getImagePaths();
+                if (imgPaths != null && !imgPaths.isEmpty()) {
+                    imageFiles = new java.util.ArrayList<>();
+                    for (String path : imgPaths) {
+                        imageFiles.add(new File(path));
+                    }
+                }
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -125,12 +131,12 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
             return comic.getTotalPages();
         }
         if ("epub".equals(comic.getFileType())) {
-            if (imageFiles != null && !imageFiles.isEmpty() && imageFiles.size() != comic.getTotalPages()) {
-                comic.setTotalPages(imageFiles.size());
-            }
-            return comic.getTotalPages();
+            return 1;
         }
         if ("mobi".equals(comic.getFileType())) {
+            if (imageFiles != null && !imageFiles.isEmpty()) {
+                return imageFiles.size();
+            }
             return comic.getTotalPages();
         }
         if ("txt".equals(comic.getFileType())) {
@@ -163,16 +169,42 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
         notifyDataSetChanged();
     }
 
+    public EpubParser getEpubParser() {
+        return epubParser;
+    }
+
+    public void scrollToChapter(int chapterIndex) {
+        if ("epub".equals(comic.getFileType())) {
+            for (PageViewHolder holder : activeViewHolders) {
+                if (holder.viewType == 1) {
+                    holder.scrollToChapter(chapterIndex);
+                    return;
+                }
+            }
+        }
+    }
+
+    private List<PageViewHolder> activeViewHolders = new java.util.ArrayList<>();
+    private OnScrollProgressListener scrollProgressListener;
+    
+    public interface OnScrollProgressListener {
+        void onScrollProgress(int progress);
+    }
+    
+    public void setOnScrollProgressListener(OnScrollProgressListener listener) {
+        this.scrollProgressListener = listener;
+    }
+
     @Override
     public int getItemViewType(int position) {
         String type = comic.getFileType();
         if ("epub".equals(type)) {
-            if (imageFiles != null && !imageFiles.isEmpty()) {
-                return 0;
-            }
             return 1;
         }
         if ("mobi".equals(type)) {
+            if (imageFiles != null && !imageFiles.isEmpty()) {
+                return 0;
+            }
             return 2;
         }
         if ("txt".equals(type)) {
@@ -195,12 +227,14 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
 
     @Override
     public void onBindViewHolder(@NonNull PageViewHolder holder, int position) {
+        activeViewHolders.add(holder);
         holder.bind(position);
         preloadPages(position);
     }
 
     @Override
     public void onViewRecycled(@NonNull PageViewHolder holder) {
+        activeViewHolders.remove(holder);
         super.onViewRecycled(holder);
         if (holder.viewType == 1 || holder.viewType == 2 || holder.viewType == 3) {
             if (holder.webView != null) {
@@ -297,14 +331,42 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
             this.viewType = viewType;
             if (viewType == 1 || viewType == 2 || viewType == 3) {
                 webView = itemView.findViewById(R.id.page_webview);
-                webView.getSettings().setJavaScriptEnabled(false);
+                webView.getSettings().setJavaScriptEnabled(true);
                 webView.getSettings().setUseWideViewPort(true);
                 webView.getSettings().setLoadWithOverviewMode(true);
                 webView.getSettings().setAllowFileAccess(true);
                 webView.setBackgroundColor(ContextCompat.getColor(context, R.color.background));
+                
+                if (viewType == 1) {
+                    webView.setWebViewClient(new WebViewClient() {
+                        @Override
+                        public void onPageFinished(WebView view, String url) {
+                            super.onPageFinished(view, url);
+                            setupScrollListener();
+                        }
+                    });
+                }
             } else {
                 imageView = (ImageView) itemView;
             }
+        }
+        
+        private void setupScrollListener() {
+            webView.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+                @Override
+                public void onScrollChange(View v, int scrollX, int scrollY, int oldScrollX, int oldScrollY) {
+                    if (scrollProgressListener != null) {
+                        float contentHeight = webView.getContentHeight() * webView.getScale();
+                        int viewHeight = webView.getHeight();
+                        if (contentHeight > viewHeight) {
+                            float scrollRange = contentHeight - viewHeight;
+                            int progress = scrollRange > 0 ? (int) ((scrollY * 100.0) / scrollRange) : 0;
+                            progress = Math.max(0, Math.min(100, progress));
+                            scrollProgressListener.onScrollProgress(progress);
+                        }
+                    }
+                }
+            });
         }
 
         void bind(int position) {
@@ -379,8 +441,6 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
             webView.stopLoading();
             webView.loadUrl("about:blank");
 
-            final int pageIndex = position;
-
             loadThread = new Thread(() -> {
                 try {
                     Thread.sleep(100);
@@ -388,7 +448,7 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
 
                     String content = "";
                     if (epubParser != null) {
-                        content = epubParser.getChapterContent(pageIndex);
+                        content = epubParser.getFullContent();
                     }
 
                     if (Thread.interrupted()) return;
@@ -410,6 +470,13 @@ public class ComicReaderAdapter extends RecyclerView.Adapter<ComicReaderAdapter.
                 }
             });
             loadThread.start();
+        }
+
+        void scrollToChapter(int chapterIndex) {
+            if (webView != null && epubParser != null) {
+                String anchorId = "chapter_" + chapterIndex;
+                webView.loadUrl("javascript:var el = document.getElementById('" + anchorId + "'); if(el) { el.scrollIntoView(true); } else { setTimeout(function() { var el2 = document.getElementById('" + anchorId + "'); if(el2) el2.scrollIntoView(true); }, 500); }");
+            }
         }
 
         void bindMobi(int position) {

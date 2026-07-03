@@ -17,7 +17,9 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatDelegate;
 import androidx.appcompat.widget.SearchView;
+import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.lifecycle.ViewModelProvider;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -60,13 +62,15 @@ public class MainActivity extends AppCompatActivity implements ComicAdapter.OnCo
     private String currentCategory = "全部";
     private String currentSort = "name";
     private String searchQuery = "";
-    private boolean isCollapsed = false;
 
     private LinearLayout selectionBottomBar;
     private TextView selectionCountText;
     private FloatingActionButton fabImport;
+    private DrawerLayout drawerLayout;
 
     private static final String[] CATEGORIES = {"全部", "国漫", "韩漫", "港漫", "日漫", "其他"};
+
+    private AppSettings settings;
 
     @Override
     protected void attachBaseContext(Context newBase) {
@@ -106,12 +110,15 @@ public class MainActivity extends AppCompatActivity implements ComicAdapter.OnCo
 
         viewModel = new ViewModelProvider(this).get(ComicViewModel.class);
 
+        ComicApplication app = (ComicApplication) getApplicationContext();
+        settings = app.getDatabase().getSettings();
+
         initViews();
         observeViewModel();
         setupAdapter();
         setupCategories();
         setupSortButton();
-        setupCollapseButton();
+        setupDrawerButton();
         setupSearchView();
         setupSelectionButtons();
 
@@ -156,20 +163,16 @@ public class MainActivity extends AppCompatActivity implements ComicAdapter.OnCo
         emptyState = findViewById(R.id.empty_state);
         loading = findViewById(R.id.loading);
         categoryChips = findViewById(R.id.category_chips);
-        collapsibleArea = findViewById(R.id.collapsible_area);
-        btnCollapse = findViewById(R.id.btn_collapse);
         searchView = findViewById(R.id.search_view);
         selectionBottomBar = findViewById(R.id.selection_bottom_bar);
         selectionCountText = findViewById(R.id.selection_count_text);
         fabImport = findViewById(R.id.fab_import);
+        drawerLayout = findViewById(R.id.drawer_layout);
 
         GridLayoutManager layoutManager = new GridLayoutManager(this, 2);
         comicRecycler.setLayoutManager(layoutManager);
 
-        MaterialToolbar toolbar = findViewById(R.id.toolbar);
-        toolbar.setTitle(R.string.title_main);
-        toolbar.setNavigationIcon(R.drawable.ic_settings);
-        toolbar.setNavigationOnClickListener(v -> openSettings());
+        findViewById(R.id.fab_settings).setOnClickListener(v -> openSettings());
     }
 
     private void setupAdapter() {
@@ -286,12 +289,43 @@ public class MainActivity extends AppCompatActivity implements ComicAdapter.OnCo
         });
     }
 
-    private void setupCollapseButton() {
-        btnCollapse.setOnClickListener(v -> {
-            isCollapsed = !isCollapsed;
-            collapsibleArea.setVisibility(isCollapsed ? View.GONE : View.VISIBLE);
-            btnCollapse.setIconResource(isCollapsed ? R.drawable.ic_expand_more : R.drawable.ic_expand_less);
+    private void setupDrawerButton() {
+        MaterialButton btnDrawer = findViewById(R.id.btn_drawer);
+        btnDrawer.setOnClickListener(v -> {
+            drawerLayout.openDrawer(findViewById(R.id.sidebar));
         });
+
+        findViewById(R.id.btn_close_sidebar).setOnClickListener(v -> {
+            drawerLayout.closeDrawer(findViewById(R.id.sidebar));
+        });
+
+        MaterialButton btnThemeToggle = findViewById(R.id.btn_theme_toggle);
+        btnThemeToggle.setOnClickListener(v -> {
+            String currentTheme = settings.getTheme();
+            String newTheme = AppSettings.THEME_DARK.equals(currentTheme) ? AppSettings.THEME_LIGHT : AppSettings.THEME_DARK;
+            settings.setTheme(newTheme);
+            viewModel.saveSettings(settings);
+            applyTheme(newTheme);
+            btnThemeToggle.setText(AppSettings.THEME_DARK.equals(newTheme) ? getString(R.string.dark_mode) : getString(R.string.light_mode));
+        });
+        btnThemeToggle.setText(AppSettings.THEME_DARK.equals(settings.getTheme()) ? getString(R.string.dark_mode) : getString(R.string.light_mode));
+    }
+
+    private void applyTheme(String theme) {
+        switch (theme) {
+            case AppSettings.THEME_LIGHT:
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO);
+                break;
+            case AppSettings.THEME_DARK:
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
+                break;
+            case AppSettings.THEME_EYE:
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO);
+                break;
+            default:
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM);
+                break;
+        }
     }
 
     @Override

@@ -29,8 +29,10 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager2.widget.ViewPager2;
 import com.example.comicreader.adapter.ComicReaderAdapter;
+import com.example.comicreader.adapter.TocAdapter;
 import com.example.comicreader.model.AppSettings;
 import com.example.comicreader.model.ComicBook;
+import com.example.comicreader.utils.EpubParser;
 import com.example.comicreader.utils.PdfRendererManager;
 import com.example.comicreader.utils.ReadingStatsManager;
 import com.example.comicreader.viewmodel.ComicViewModel;
@@ -63,6 +65,11 @@ public class ReaderActivity extends AppCompatActivity {
     private boolean barsVisible = true;
     private boolean isGrayscale = false;
     private int spacingMode = 0;
+
+    private LinearLayout tocPanel;
+    private LinearLayout tocPanelBg;
+    private RecyclerView tocRecycler;
+    private TocAdapter tocAdapter;
 
     private boolean isVerticalMode = true;
     private ViewPager2.OnPageChangeCallback pageChangeCallback;
@@ -187,9 +194,16 @@ public class ReaderActivity extends AppCompatActivity {
 
         findViewById(R.id.btn_settings).setOnClickListener(v -> openSettings());
 
-        // 初始化自动翻页按钮
         autoPageButton = findViewById(R.id.btn_auto_page);
         autoPageButton.setOnClickListener(v -> toggleAutoPageTurn());
+
+        tocPanel = findViewById(R.id.toc_panel);
+        tocPanelBg = findViewById(R.id.toc_panel_bg);
+        tocRecycler = findViewById(R.id.toc_recycler);
+
+        findViewById(R.id.btn_toc).setOnClickListener(v -> toggleToc());
+        findViewById(R.id.btn_close_toc).setOnClickListener(v -> closeToc());
+        tocPanelBg.setOnClickListener(v -> closeToc());
     }
 
     private void setupTitle() {
@@ -416,6 +430,7 @@ public class ReaderActivity extends AppCompatActivity {
 
         adapter = new ComicReaderAdapter(this, comic);
         adapter.setSpacingMode(spacingMode);
+        setupEpubScrollListener(adapter);
         recyclerView.setAdapter(adapter);
 
         int defaultMargin = getResources().getDimensionPixelSize(R.dimen.page_spacing);
@@ -664,6 +679,102 @@ public class ReaderActivity extends AppCompatActivity {
     private void openSettings() {
         Intent intent = new Intent(this, SettingsActivity.class);
         startActivity(intent);
+    }
+
+    private void toggleToc() {
+        if (tocPanel.getVisibility() == View.VISIBLE) {
+            closeToc();
+        } else {
+            openToc();
+        }
+    }
+
+    private void openToc() {
+        if (!"epub".equals(comic.getFileType()) && !"mobi".equals(comic.getFileType())) {
+            Toast.makeText(this, R.string.no_toc, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        EpubParser epubParser = null;
+        if (adapter != null && adapter.getEpubParser() != null) {
+            epubParser = adapter.getEpubParser();
+        }
+
+        if (epubParser == null) {
+            Toast.makeText(this, R.string.no_toc, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        List<EpubParser.TocItem> toc = epubParser.getToc();
+        if (toc == null || toc.isEmpty()) {
+            Toast.makeText(this, R.string.no_toc, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        int currentPage = 0;
+        if (layoutManager != null) {
+            currentPage = layoutManager.findFirstVisibleItemPosition();
+        } else if (viewPager != null && viewPager.getVisibility() == View.VISIBLE) {
+            currentPage = viewPager.getCurrentItem();
+        }
+
+        tocAdapter = new TocAdapter(this, toc, currentPage, chapterIndex -> {
+            jumpToChapter(chapterIndex);
+            closeToc();
+        });
+
+        tocRecycler.setLayoutManager(new LinearLayoutManager(this));
+        tocRecycler.setAdapter(tocAdapter);
+
+        tocPanelBg.setVisibility(View.VISIBLE);
+        tocPanel.setVisibility(View.VISIBLE);
+    }
+
+    private void closeToc() {
+        tocPanel.setVisibility(View.GONE);
+        tocPanelBg.setVisibility(View.GONE);
+    }
+
+    private void jumpToChapter(int chapterIndex) {
+        if (adapter != null) {
+            adapter.scrollToChapter(chapterIndex);
+        }
+    }
+
+    private void setupEpubScrollListener(ComicReaderAdapter adapter) {
+        if (!"epub".equals(comic.getFileType())) return;
+        
+        adapter.setOnScrollProgressListener(progress -> {
+            updateEpubProgress(progress);
+        });
+    }
+
+    private void updateEpubProgress(int progress) {
+        TextView pageInfo = findViewById(R.id.page_info);
+        int chapterCount = 0;
+        if (adapter != null && adapter.getEpubParser() != null) {
+            chapterCount = adapter.getEpubParser().getChapters().size();
+        }
+        
+        pageInfo.setText(String.format("进度 %d%%", progress));
+
+        TextView pagePercent = findViewById(R.id.page_percent);
+        pagePercent.setText(progress + "%");
+
+        ProgressBar progressBar = findViewById(R.id.reader_progress);
+        progressBar.setProgress(progress);
+
+        scrollSeekBar.setProgress(progress);
+
+        progressIndicator.post(() -> {
+            int topBarHeight = topBar.getVisibility() == View.VISIBLE ? topBar.getHeight() : 0;
+            int bottomBarHeight = bottomBar.getVisibility() == View.VISIBLE ? bottomBar.getHeight() : 0;
+            int indicatorHeight = progressIndicator.getHeight();
+            int availableHeight = getResources().getDisplayMetrics().heightPixels - topBarHeight - bottomBarHeight;
+            int maxPosition = availableHeight - indicatorHeight;
+            float y = topBarHeight + (progress / 100.0f) * maxPosition;
+            progressIndicator.setY(y);
+        });
     }
 
     @Override

@@ -13,4 +13,6 @@
     <color name="error">#CF6679</color>
     <color name="success">#00E676</color>
     <color name="divider">#333333</color>
+    <color name="accent">#B388FF</color>
+    <color name="surface_variant">#2A2A2A</color>
 </resources>

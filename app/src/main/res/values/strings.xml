@@ -90,4 +90,8 @@
     <string name="read_count">次数</string>
     <string name="custom_tag">自定义标签</string>
     <string name="custom_tag_hint">输入自定义标签名称</string>
+    <string name="toc">目录</string>
+    <string name="close">关闭</string>
+    <string name="no_toc">暂无目录</string>
+    <string name="settings">设置</string>
 </resources>

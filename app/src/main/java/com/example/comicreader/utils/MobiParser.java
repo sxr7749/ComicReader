@@ -2,7 +2,6 @@ package com.example.comicreader.utils;
 
 import android.content.Context;
 import java.io.*;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,6 +11,9 @@ public class MobiParser {
     private Context context;
     private MobiInfo cachedInfo;
     private boolean parsed = false;
+    private List<String> imagePaths = new ArrayList<>();
+    private boolean isComicMode = false;
+    private List<String> chapterContents = new ArrayList<>();
 
     public MobiParser(File mobiFile, Context context) {
         this.mobiFile = mobiFile;
@@ -23,7 +25,7 @@ public class MobiParser {
             return cachedInfo;
         }
 
-        if (mobiFile.length() < 100) {
+        if (mobiFile.length() < 50) {
             throw new IOException("文件太小，不是有效的MOBI文件");
         }
 
@@ -31,12 +33,8 @@ public class MobiParser {
 
         try (RandomAccessFile raf = new RandomAccessFile(mobiFile, "r")) {
             raf.seek(0);
-            byte[] header = new byte[256];
+            byte[] header = new byte[512];
             int bytesRead = raf.read(header);
-
-            if (!isValidMobiFile(header, bytesRead)) {
-                throw new IOException("不是有效的MOBI文件");
-            }
 
             int headerType = detectHeaderType(header, bytesRead);
 
@@ -50,17 +48,29 @@ public class MobiParser {
                 parseGenericFormat(raf, info);
             }
 
-            if (info.chapters.isEmpty()) {
-                extractTextFromAllRecords(raf, info);
+            extractAllImages(raf);
+
+            if (isComicMode) {
+                info.totalPages = imagePaths.size();
+            } else {
+                if (info.chapters.isEmpty()) {
+                    extractTextFromAllRecords(raf, info);
+                }
+                info.totalPages = info.chapters.size();
             }
 
-            info.totalPages = info.chapters.size();
             if (info.totalPages == 0) {
                 info.totalPages = 1;
-                info.chapters.add("");
+                if (isComicMode && !imagePaths.isEmpty()) {
+                    info.totalPages = imagePaths.size();
+                } else {
+                    info.chapters.add("");
+                }
             }
 
-            info.coverPath = extractCover();
+            if (info.coverPath == null) {
+                info.coverPath = extractCover();
+            }
 
         }
 
@@ -69,54 +79,35 @@ public class MobiParser {
         return info;
     }
 
-    private boolean isValidMobiFile(byte[] header, int bytesRead) {
-        if (bytesRead < 16) return false;
-
-        String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
-
-        if (identifier.startsWith("BOOKMOBI")) return true;
-        if (identifier.startsWith("MOBI")) return true;
-        if (identifier.startsWith("TEXt")) return true;
-
-        if (bytesRead >= 40) {
-            int dbType = (header[32] & 0xFF) << 24 | (header[33] & 0xFF) << 16 |
-                         (header[34] & 0xFF) << 8 | (header[35] & 0xFF);
-            int creator = (header[36] & 0xFF) << 24 | (header[37] & 0xFF) << 16 |
-                          (header[38] & 0xFF) << 8 | (header[39] & 0xFF);
-
-            if (dbType == 0x4D4F4249 || dbType == 0x54455874) return true;
-            if (creator == 0x4B494E44 || creator == 0x4D4F4249) return true;
-            if (creator == 0x414D415A || creator == 0x4B465820) return true;
-        }
-
-        if (bytesRead >= 16) {
-            int magic = (header[0] & 0xFF) << 24 | (header[1] & 0xFF) << 16 |
-                        (header[2] & 0xFF) << 8 | (header[3] & 0xFF);
-            if (magic == 0x4D4F4249) return true;
-            if (magic == 0x504B0304) return true;
-        }
-
-        return false;
-    }
-
     private int detectHeaderType(byte[] header, int bytesRead) {
-        String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
-
-        if (identifier.startsWith("BOOKMOBI")) return 1;
+        if (bytesRead >= 8) {
+            String identifier = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII).trim();
+            if (identifier.startsWith("BOOKMOBI")) return 1;
+            if (identifier.startsWith("MOBI")) return 1;
+        }
 
         if (bytesRead >= 40) {
             int creator = (header[36] & 0xFF) << 24 | (header[37] & 0xFF) << 16 |
                           (header[38] & 0xFF) << 8 | (header[39] & 0xFF);
             if (creator == 0x4B465820) return 3;
+            if (creator == 0x4B494E44) return 3;
+            if (creator == 0x4D4F4249) return 1;
+            if (creator == 0x414D415A) return 2;
         }
 
         if (bytesRead >= 16) {
             int magic = (header[0] & 0xFF) << 24 | (header[1] & 0xFF) << 16 |
                         (header[2] & 0xFF) << 8 | (header[3] & 0xFF);
             if (magic == 0x504B0304) return 3;
+            if (magic == 0x4D4F4249) return 1;
         }
 
-        return 2;
+        if (bytesRead >= 8) {
+            String id8 = new String(header, 0, Math.min(bytesRead, 8), StandardCharsets.US_ASCII);
+            if (id8.startsWith("TEXt") || id8.startsWith("BOOK")) return 2;
+        }
+
+        return 0;
     }
 
     private void parseBookMobiFormat(RandomAccessFile raf, MobiInfo info) throws IOException {
@@ -152,7 +143,6 @@ public class MobiParser {
                 if (pos + 8 > mobiFile.length()) break;
                 raf.seek(pos);
                 int offset = readIntBE(raf);
-                int type = readIntBE(raf);
                 if (i == 0) textOffset = offset;
             }
 
@@ -214,7 +204,7 @@ public class MobiParser {
             raf.readFully(contentStart);
 
             String contentId = new String(contentStart, StandardCharsets.US_ASCII).trim();
-            if (contentId.startsWith("MOBI")) {
+            if (contentId.startsWith("MOBI") || contentId.startsWith("BOOK")) {
                 parseBookMobiFormat(raf, info);
             } else {
                 extractTextFromOffset(raf, fileDataOffset, info);
@@ -237,6 +227,90 @@ public class MobiParser {
             if (content.length() > 100) {
                 info.chapters = extractChapters(content);
             }
+
+            int jpgCount = countPattern(buffer, new byte[]{(byte) 0xFF, (byte) 0xD8, (byte) 0xFF});
+            int pngCount = countPattern(buffer, new byte[]{(byte) 0x89, 0x50, 0x4E, 0x47});
+
+            if (jpgCount + pngCount > 10) {
+                isComicMode = true;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private int countPattern(byte[] data, byte[] pattern) {
+        int count = 0;
+        for (int i = 0; i <= data.length - pattern.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < pattern.length; j++) {
+                if (data[i + j] != pattern[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void extractAllImages(RandomAccessFile raf) {
+        try {
+            raf.seek(0);
+            int fileSize = (int) Math.min(mobiFile.length(), 50 * 1024 * 1024);
+            byte[] buffer = new byte[fileSize];
+            raf.readFully(buffer);
+
+            List<byte[]> extractedImages = new ArrayList<>();
+
+            int pos = 0;
+            while (pos < buffer.length - 3) {
+                if (buffer[pos] == (byte) 0xFF && buffer[pos + 1] == (byte) 0xD8 && buffer[pos + 2] == (byte) 0xFF) {
+                    int end = findPattern(buffer, new byte[]{(byte) 0xFF, (byte) 0xD9}, pos + 3);
+                    if (end >= pos) {
+                        int len = end - pos + 2;
+                        if (len > 1000) {
+                            byte[] img = new byte[len];
+                            System.arraycopy(buffer, pos, img, 0, len);
+                            extractedImages.add(img);
+                        }
+                        pos = end + 2;
+                        continue;
+                    }
+                } else if (buffer[pos] == (byte) 0x89 && buffer[pos + 1] == 0x50 &&
+                           buffer[pos + 2] == 0x4E && buffer[pos + 3] == 0x47) {
+                    int end = findPattern(buffer, new byte[]{0x49, 0x45, 0x4E, 0x44, (byte) 0xAE, (byte) 0x42, (byte) 0x60, (byte) 0x82}, pos + 4);
+                    if (end >= pos) {
+                        int len = end - pos + 8;
+                        if (len > 1000) {
+                            byte[] img = new byte[len];
+                            System.arraycopy(buffer, pos, img, 0, len);
+                            extractedImages.add(img);
+                        }
+                        pos = end + 8;
+                        continue;
+                    }
+                }
+                pos++;
+            }
+
+            if (extractedImages.size() > 5) {
+                isComicMode = true;
+            }
+
+            for (int i = 0; i < extractedImages.size(); i++) {
+                byte[] img = extractedImages.get(i);
+                String ext = (img[0] == (byte) 0xFF && img[1] == (byte) 0xD8) ? ".jpg" : ".png";
+                String fileName = "mobi_img_" + i + ext;
+                File imgFile = new File(FileUtils.getCacheDirectory(context), fileName);
+                try (OutputStream os = new FileOutputStream(imgFile)) {
+                    os.write(img);
+                }
+                imagePaths.add(imgFile.getAbsolutePath());
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -517,7 +591,11 @@ public class MobiParser {
     }
 
     private int findPattern(byte[] data, byte[] pattern) {
-        for (int i = 0; i <= data.length - pattern.length; i++) {
+        return findPattern(data, pattern, 0);
+    }
+
+    private int findPattern(byte[] data, byte[] pattern, int startPos) {
+        for (int i = startPos; i <= data.length - pattern.length; i++) {
             boolean match = true;
             for (int j = 0; j < pattern.length; j++) {
                 if (data[i + j] != pattern[j]) {
@@ -570,6 +648,13 @@ public class MobiParser {
             parse();
         }
 
+        if (isComicMode) {
+            if (chapterIndex >= 0 && chapterIndex < imagePaths.size()) {
+                return createImagePage(imagePaths.get(chapterIndex));
+            }
+            return "<html><body style='background:#1A1A1A;color:#E0E0E0;padding:16px;'>暂无内容</body></html>";
+        }
+
         if (cachedInfo == null || cachedInfo.chapters.isEmpty()) {
             return "<html><body style='background:#1A1A1A;color:#E0E0E0;padding:16px;'>暂无内容</body></html>";
         }
@@ -595,6 +680,23 @@ public class MobiParser {
         html.append(bodyContent);
         html.append("</body></html>");
         return html.toString();
+    }
+
+    private String createImagePage(String imagePath) {
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
+        html.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">");
+        html.append("<style>");
+        html.append("body { background-color: #1A1A1A; margin: 0; padding: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }");
+        html.append("img { max-width: 100%; max-height: 100vh; display: block; }");
+        html.append("</style></head><body>");
+        html.append("<img src=\"file://").append(imagePath).append("\">");
+        html.append("</body></html>");
+        return html.toString();
+    }
+
+    public List<String> getImagePaths() {
+        return imagePaths;
     }
 
     public static class MobiInfo {

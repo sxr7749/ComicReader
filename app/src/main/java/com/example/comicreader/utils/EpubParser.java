@@ -5,6 +5,7 @@ import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 import org.xmlpull.v1.XmlPullParserFactory;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -15,10 +16,42 @@ import java.util.zip.ZipInputStream;
 public class EpubParser {
     private File epubFile;
     private Context context;
-    private List<String> chapterPaths = new ArrayList<>();
-    private List<String> imagePaths = new ArrayList<>();
     private String extractionDir;
     private boolean parsed = false;
+    private List<Chapter> chapters = new ArrayList<>();
+    private List<TocItem> toc = new ArrayList<>();
+    private String title = "";
+    private String author = "";
+    private String coverPath = null;
+
+    public class Chapter {
+        public String id;
+        public String href;
+        public String title;
+        public String content;
+        public int pageStart;
+        public int pageEnd;
+
+        public Chapter(String id, String href, String title) {
+            this.id = id;
+            this.href = href;
+            this.title = title;
+        }
+    }
+
+    public class TocItem {
+        public String title;
+        public int chapterIndex;
+        public int level;
+        public List<TocItem> children;
+
+        public TocItem(String title, int chapterIndex, int level) {
+            this.title = title;
+            this.chapterIndex = chapterIndex;
+            this.level = level;
+            this.children = new ArrayList<>();
+        }
+    }
 
     public EpubParser(File epubFile, Context context) {
         this.epubFile = epubFile;
@@ -29,13 +62,10 @@ public class EpubParser {
         EpubInfo info = new EpubInfo();
 
         if (parsed) {
-            if (!imagePaths.isEmpty()) {
-                info.totalPages = imagePaths.size();
-            } else if (!chapterPaths.isEmpty()) {
-                info.totalPages = chapterPaths.size();
-            } else {
-                info.totalPages = 1;
-            }
+            info.title = this.title;
+            info.author = this.author;
+            info.coverPath = this.coverPath;
+            info.totalPages = chapters.size();
             return info;
         }
 
@@ -43,27 +73,25 @@ public class EpubParser {
             extractionDir = extractEpubToCache();
 
             String opfPath = findOpfPath();
-            if (opfPath != null) {
-                parseOpfFile(new File(extractionDir, opfPath), info);
+            if (opfPath == null) {
+                throw new IOException("无法找到OPF文件");
             }
 
-            if (chapterPaths.isEmpty()) {
-                findHtmlFiles(new File(extractionDir));
+            File opfFile = new File(extractionDir, opfPath);
+            Map<String, String> manifest = new HashMap<>();
+            Map<String, String> manifestMediaType = new HashMap<>();
+
+            parseOpfFile(opfFile, info, manifest, manifestMediaType);
+
+            parseSpine(opfFile, manifest, info);
+
+            parseNav(opfFile, manifest);
+
+            if (info.coverPath == null) {
+                info.coverPath = extractCover(manifest, manifestMediaType, new File(opfFile.getParent()).getAbsolutePath());
             }
 
-            extractImagesFromChapters();
-
-            if (!imagePaths.isEmpty()) {
-                info.totalPages = imagePaths.size();
-            } else if (!chapterPaths.isEmpty()) {
-                info.totalPages = chapterPaths.size();
-            } else {
-                info.totalPages = 1;
-            }
-
-            if (info.coverPath == null && !imagePaths.isEmpty()) {
-                info.coverPath = imagePaths.get(0);
-            }
+            loadChapterContents(manifest);
 
             parsed = true;
 
@@ -161,16 +189,10 @@ public class EpubParser {
         return null;
     }
 
-    private void parseOpfFile(File opfFile, EpubInfo info) throws IOException, XmlPullParserException {
+    private void parseOpfFile(File opfFile, EpubInfo info, Map<String, String> manifest, Map<String, String> manifestMediaType) throws IOException, XmlPullParserException {
         XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
         XmlPullParser parser = factory.newPullParser();
         parser.setInput(new FileReader(opfFile));
-
-        String opfDir = opfFile.getParent();
-        if (opfDir == null) opfDir = extractionDir;
-
-        Map<String, String> manifest = new HashMap<>();
-        Map<String, String> manifestMediaType = new HashMap<>();
 
         int eventType = parser.getEventType();
         while (eventType != XmlPullParser.END_DOCUMENT) {
@@ -181,48 +203,10 @@ public class EpubParser {
                         parseMetadata(parser, info);
                     } else if (tag.equals("manifest")) {
                         parseManifest(parser, manifest, manifestMediaType);
-                    } else if (tag.equals("spine")) {
-                        parseSpine(parser, manifest, opfDir);
                     }
                     break;
             }
             eventType = parser.next();
-        }
-
-        extractImagesFromManifest(manifest, manifestMediaType, opfDir);
-    }
-
-    private void extractImagesFromManifest(Map<String, String> manifest, Map<String, String> manifestMediaType, String opfDir) {
-        for (Map.Entry<String, String> entry : manifest.entrySet()) {
-            String id = entry.getKey();
-            String href = entry.getValue();
-            String mediaType = manifestMediaType.get(id);
-
-            File imgFile = new File(opfDir, href);
-            if (!imgFile.exists()) {
-                imgFile = new File(extractionDir, href);
-            }
-            if (!imgFile.exists()) {
-                if (href.startsWith("/")) {
-                    imgFile = new File(extractionDir, href.substring(1));
-                }
-            }
-
-            if (imgFile.exists()) {
-                boolean isImage = false;
-                if (mediaType != null && mediaType.startsWith("image/")) {
-                    isImage = true;
-                } else {
-                    isImage = isImageFile(imgFile.getName()) || isImageFileByMagic(imgFile);
-                }
-
-                if (isImage) {
-                    String imgPath = imgFile.getAbsolutePath();
-                    if (!imagePaths.contains(imgPath)) {
-                        imagePaths.add(imgPath);
-                    }
-                }
-            }
         }
     }
 
@@ -237,6 +221,7 @@ public class EpubParser {
                         String text = parser.getText();
                         if (text != null && !text.trim().isEmpty()) {
                             info.title = text.trim();
+                            this.title = info.title;
                         }
                     }
                 } else if (tag.contains("creator") || tag.endsWith(":creator") || tag.contains("author")) {
@@ -245,7 +230,13 @@ public class EpubParser {
                         String text = parser.getText();
                         if (text != null && !text.trim().isEmpty()) {
                             info.author = text.trim();
+                            this.author = info.author;
                         }
+                    }
+                } else if (tag.contains("cover")) {
+                    String coverId = parser.getAttributeValue(null, "content");
+                    if (coverId != null && !coverId.isEmpty()) {
+                        info.coverId = coverId;
                     }
                 }
             }
@@ -271,18 +262,42 @@ public class EpubParser {
         }
     }
 
-    private void parseSpine(XmlPullParser parser, Map<String, String> manifest, String opfDir) throws XmlPullParserException, IOException {
+    private void parseSpine(File opfFile, Map<String, String> manifest, EpubInfo info) throws IOException, XmlPullParserException {
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        XmlPullParser parser = factory.newPullParser();
+        parser.setInput(new FileReader(opfFile));
+
+        String opfDir = opfFile.getParent();
+
+        int eventType = parser.getEventType();
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            if (eventType == XmlPullParser.START_TAG && "spine".equalsIgnoreCase(parser.getName())) {
+                parseSpineItems(parser, manifest, opfDir);
+                break;
+            }
+            eventType = parser.next();
+        }
+
+        info.totalPages = chapters.size();
+    }
+
+    private void parseSpineItems(XmlPullParser parser, Map<String, String> manifest, String opfDir) throws XmlPullParserException, IOException {
         int eventType = parser.next();
         while (!(eventType == XmlPullParser.END_TAG && "spine".equalsIgnoreCase(parser.getName()))) {
             if (eventType == XmlPullParser.START_TAG && "itemref".equalsIgnoreCase(parser.getName())) {
                 String idref = parser.getAttributeValue(null, "idref");
+                String linear = parser.getAttributeValue(null, "linear");
+
+                if ("no".equalsIgnoreCase(linear)) {
+                    eventType = parser.next();
+                    continue;
+                }
+
                 if (idref != null) {
                     String href = manifest.get(idref);
                     if (href != null) {
-                        File chapterFile = new File(opfDir, href);
-                        if (chapterFile.exists()) {
-                            chapterPaths.add(chapterFile.getAbsolutePath());
-                        }
+                        String chapterTitle = extractChapterTitle(idref, href, opfDir);
+                        chapters.add(new Chapter(idref, href, chapterTitle));
                     }
                 }
             }
@@ -290,394 +305,348 @@ public class EpubParser {
         }
     }
 
-    private void findHtmlFiles(File dir) {
-        File[] files = dir.listFiles();
-        if (files == null) return;
+    private String extractChapterTitle(String idref, String href, String opfDir) {
+        try {
+            File chapterFile = new File(opfDir, href);
+            if (!chapterFile.exists()) {
+                chapterFile = new File(extractionDir, href);
+            }
 
-        for (File file : files) {
-            if (file.isDirectory()) {
-                findHtmlFiles(file);
-            } else {
-                String name = file.getName().toLowerCase();
-                if ((name.endsWith(".html") || name.endsWith(".xhtml") || name.endsWith(".htm"))) {
-                    if (!chapterPaths.contains(file.getAbsolutePath())) {
-                        chapterPaths.add(file.getAbsolutePath());
+            if (chapterFile.exists()) {
+                String content = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(chapterFile.getAbsolutePath())), StandardCharsets.UTF_8);
+                
+                int titleStart = content.toLowerCase().indexOf("<title");
+                if (titleStart >= 0) {
+                    int titleEnd = content.indexOf(">", titleStart);
+                    if (titleEnd >= 0) {
+                        int titleClose = content.indexOf("</title>", titleEnd);
+                        if (titleClose >= 0) {
+                            String title = content.substring(titleEnd + 1, titleClose).trim();
+                            if (!title.isEmpty()) return title;
+                        }
                     }
                 }
+
+                int h1Start = content.toLowerCase().indexOf("<h1");
+                if (h1Start >= 0) {
+                    int h1End = content.indexOf(">", h1Start);
+                    if (h1End >= 0) {
+                        int h1Close = content.indexOf("</h1>", h1End);
+                        if (h1Close >= 0) {
+                            String title = content.substring(h1End + 1, h1Close).replaceAll("<[^>]*>", "").trim();
+                            if (!title.isEmpty()) return title;
+                        }
+                    }
+                }
+
+                int h2Start = content.toLowerCase().indexOf("<h2");
+                if (h2Start >= 0) {
+                    int h2End = content.indexOf(">", h2Start);
+                    if (h2End >= 0) {
+                        int h2Close = content.indexOf("</h2>", h2End);
+                        if (h2Close >= 0) {
+                            String title = content.substring(h2End + 1, h2Close).replaceAll("<[^>]*>", "").trim();
+                            if (!title.isEmpty()) return title;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        File file = new File(href);
+        String name = file.getName();
+        return name.replaceAll("\\.[^.]+$", "");
+    }
+
+    private void parseNav(File opfFile, Map<String, String> manifest) throws IOException, XmlPullParserException {
+        String opfDir = opfFile.getParent();
+
+        String navId = null;
+        for (Map.Entry<String, String> entry : manifest.entrySet()) {
+            String href = entry.getValue();
+            if (href.toLowerCase().endsWith("nav.xhtml") || href.toLowerCase().endsWith("toc.ncx")) {
+                navId = entry.getKey();
+                break;
+            }
+        }
+
+        if (navId == null) {
+            for (Map.Entry<String, String> entry : manifest.entrySet()) {
+                String href = entry.getValue();
+                if (href.toLowerCase().contains("toc") || href.toLowerCase().contains("nav")) {
+                    navId = entry.getKey();
+                    break;
+                }
+            }
+        }
+
+        if (navId != null) {
+            String navHref = manifest.get(navId);
+            File navFile = new File(opfDir, navHref);
+            if (!navFile.exists()) {
+                navFile = new File(extractionDir, navHref);
+            }
+
+            if (navFile.exists()) {
+                if (navHref.toLowerCase().endsWith(".ncx")) {
+                    parseNcx(navFile);
+                } else {
+                    parseNavXhtml(navFile);
+                }
+            }
+        }
+
+        if (toc.isEmpty()) {
+            buildTocFromChapters();
+        }
+    }
+
+    private void parseNavXhtml(File navFile) throws IOException, XmlPullParserException {
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        XmlPullParser parser = factory.newPullParser();
+        parser.setInput(new FileReader(navFile));
+
+        int eventType = parser.getEventType();
+        int level = 0;
+        TocItem currentParent = null;
+
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            switch (eventType) {
+                case XmlPullParser.START_TAG:
+                    String tag = parser.getName().toLowerCase();
+                    if (tag.equals("ol") || tag.equals("ul")) {
+                        level++;
+                    } else if (tag.equals("li")) {
+                        parseNavListItem(parser, level, currentParent);
+                    }
+                    break;
+                case XmlPullParser.END_TAG:
+                    tag = parser.getName().toLowerCase();
+                    if (tag.equals("ol") || tag.equals("ul")) {
+                        level--;
+                        if (currentParent != null && currentParent.level >= level) {
+                            currentParent = findParentForLevel(level);
+                        }
+                    }
+                    break;
+            }
+            eventType = parser.next();
+        }
+    }
+
+    private void parseNavListItem(XmlPullParser parser, int level, TocItem parent) throws XmlPullParserException, IOException {
+        int eventType = parser.next();
+        String title = "";
+        String href = "";
+
+        while (!(eventType == XmlPullParser.END_TAG && "li".equalsIgnoreCase(parser.getName()))) {
+            if (eventType == XmlPullParser.START_TAG) {
+                String tag = parser.getName().toLowerCase();
+                if (tag.equals("a")) {
+                    href = parser.getAttributeValue(null, "href");
+                    parser.next();
+                    if (parser.getEventType() == XmlPullParser.TEXT) {
+                        title = parser.getText();
+                    }
+                }
+            }
+            eventType = parser.next();
+        }
+
+        if (!title.isEmpty() && !href.isEmpty()) {
+            int chapterIndex = findChapterIndexByHref(href);
+            TocItem item = new TocItem(title, chapterIndex, level);
+
+            if (parent != null) {
+                parent.children.add(item);
+            } else {
+                toc.add(item);
             }
         }
     }
 
-    private void extractImagesFromChapters() {
-        List<String> manifestImages = new ArrayList<>(imagePaths);
+    private void parseNcx(File ncxFile) throws IOException, XmlPullParserException {
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        XmlPullParser parser = factory.newPullParser();
+        parser.setInput(new FileReader(ncxFile));
 
-        List<String> allImages = new ArrayList<>();
-        findAllImages(new File(extractionDir), allImages);
+        int eventType = parser.getEventType();
+        int level = 1;
+        TocItem currentParent = null;
 
-        List<String> htmlImages = new ArrayList<>();
-        for (String chapterPath : chapterPaths) {
-            try {
-                String content = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(chapterPath)), "UTF-8");
-                List<String> chapterImages = new ArrayList<>();
-                extractImagesFromHtmlToList(content, new File(chapterPath).getParent(), chapterImages);
-                for (String imgPath : chapterImages) {
-                    if (!htmlImages.contains(imgPath)) {
-                        htmlImages.add(imgPath);
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            switch (eventType) {
+                case XmlPullParser.START_TAG:
+                    String tag = parser.getName().toLowerCase();
+                    if (tag.equals("navpoint")) {
+                        String playOrder = parser.getAttributeValue(null, "playOrder");
+                        String id = parser.getAttributeValue(null, "id");
+                        parseNcxNavPoint(parser, level, currentParent, playOrder);
                     }
+                    break;
+            }
+            eventType = parser.next();
+        }
+    }
+
+    private void parseNcxNavPoint(XmlPullParser parser, int level, TocItem parent, String playOrder) throws XmlPullParserException, IOException {
+        int eventType = parser.next();
+        String title = "";
+        String href = "";
+
+        while (!(eventType == XmlPullParser.END_TAG && "navpoint".equalsIgnoreCase(parser.getName()))) {
+            if (eventType == XmlPullParser.START_TAG) {
+                String tag = parser.getName().toLowerCase();
+                if (tag.equals("navlabel")) {
+                    eventType = parser.next();
+                    while (!(eventType == XmlPullParser.END_TAG && "navlabel".equalsIgnoreCase(parser.getName()))) {
+                        if (eventType == XmlPullParser.START_TAG && "text".equalsIgnoreCase(parser.getName())) {
+                            parser.next();
+                            if (parser.getEventType() == XmlPullParser.TEXT) {
+                                title = parser.getText();
+                            }
+                        }
+                        eventType = parser.next();
+                    }
+                } else if (tag.equals("content")) {
+                    href = parser.getAttributeValue(null, "src");
+                }
+            }
+            eventType = parser.next();
+        }
+
+        if (!title.isEmpty() && !href.isEmpty()) {
+            int chapterIndex = findChapterIndexByHref(href);
+            if (chapterIndex < 0 && playOrder != null) {
+                try {
+                    chapterIndex = Integer.parseInt(playOrder) - 1;
+                } catch (Exception e) {
+                }
+            }
+            TocItem item = new TocItem(title, chapterIndex, level);
+
+            if (parent != null) {
+                parent.children.add(item);
+            } else {
+                toc.add(item);
+            }
+        }
+    }
+
+    private int findChapterIndexByHref(String href) {
+        String baseHref = href;
+        int hashIndex = href.indexOf("#");
+        if (hashIndex >= 0) {
+            baseHref = href.substring(0, hashIndex);
+        }
+
+        for (int i = 0; i < chapters.size(); i++) {
+            String chapterHref = chapters.get(i).href;
+            if (chapterHref.equals(baseHref) || chapterHref.endsWith("/" + baseHref)) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private TocItem findParentForLevel(int level) {
+        if (level <= 1) return null;
+
+        for (int i = toc.size() - 1; i >= 0; i--) {
+            TocItem item = toc.get(i);
+            if (item.level == level - 1) {
+                return item;
+            }
+        }
+
+        return null;
+    }
+
+    private void buildTocFromChapters() {
+        for (int i = 0; i < chapters.size(); i++) {
+            Chapter chapter = chapters.get(i);
+            if (chapter.title != null && !chapter.title.isEmpty()) {
+                toc.add(new TocItem(chapter.title, i, 1));
+            }
+        }
+    }
+
+    private void loadChapterContents(Map<String, String> manifest) {
+        String opfDir = extractionDir;
+        for (Chapter chapter : chapters) {
+            try {
+                File chapterFile = new File(opfDir, chapter.href);
+                if (!chapterFile.exists()) {
+                    chapterFile = new File(extractionDir, chapter.href);
+                }
+
+                if (!chapterFile.exists()) {
+                    int slashIndex = chapter.href.lastIndexOf("/");
+                    if (slashIndex >= 0) {
+                        String fileName = chapter.href.substring(slashIndex + 1);
+                        chapterFile = findFileInExtractionDir(fileName);
+                    }
+                }
+
+                if (chapterFile.exists()) {
+                    String content = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(chapterFile.getAbsolutePath())), StandardCharsets.UTF_8);
+                    String baseDir = chapterFile.getParent();
+                    content = fixHtmlContent(content, baseDir);
+                    chapter.content = content;
                 }
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
-
-        imagePaths.clear();
-
-        java.util.Set<String> addedSet = new java.util.HashSet<>();
-
-        if (allImages.size() > chapterPaths.size() * 2) {
-            for (String imgPath : allImages) {
-                if (!addedSet.contains(imgPath)) {
-                    imagePaths.add(imgPath);
-                    addedSet.add(imgPath);
-                }
-            }
-        } else if (!htmlImages.isEmpty()) {
-            for (String imgPath : htmlImages) {
-                if (!addedSet.contains(imgPath)) {
-                    imagePaths.add(imgPath);
-                    addedSet.add(imgPath);
-                }
-            }
-            for (String imgPath : allImages) {
-                if (!addedSet.contains(imgPath)) {
-                    imagePaths.add(imgPath);
-                    addedSet.add(imgPath);
-                }
-            }
-        } else {
-            for (String imgPath : allImages) {
-                if (!addedSet.contains(imgPath)) {
-                    imagePaths.add(imgPath);
-                    addedSet.add(imgPath);
-                }
-            }
-        }
-
-        for (String imgPath : manifestImages) {
-            if (!addedSet.contains(imgPath)) {
-                imagePaths.add(imgPath);
-            }
-        }
-
-        java.util.Collections.sort(imagePaths, (a, b) -> {
-            File fileA = new File(a);
-            File fileB = new File(b);
-            String parentA = fileA.getParent() != null ? fileA.getParent().toLowerCase() : "";
-            String parentB = fileB.getParent() != null ? fileB.getParent().toLowerCase() : "";
-            int parentCompare = naturalCompare(parentA, parentB);
-            if (parentCompare != 0) {
-                return parentCompare;
-            }
-            return compareFileNames(fileA.getName(), fileB.getName());
-        });
     }
 
-    private void extractImagesFromHtmlToList(String html, String baseDir, List<String> result) {
-        int imgStart = html.toLowerCase().indexOf("<img");
-        while (imgStart >= 0) {
-            int srcStart = html.indexOf("src=", imgStart);
-            if (srcStart >= 0) {
-                srcStart += 4;
-                while (srcStart < html.length() && (html.charAt(srcStart) == '\"' || html.charAt(srcStart) == '\'' || html.charAt(srcStart) == ' ')) {
-                    srcStart++;
-                }
-                int srcEnd = srcStart;
-                while (srcEnd < html.length() && html.charAt(srcEnd) != '\"' && html.charAt(srcEnd) != '\'' && html.charAt(srcEnd) != ' ' && html.charAt(srcEnd) != '>') {
-                    srcEnd++;
-                }
-                if (srcEnd > srcStart) {
-                    String imgSrc = html.substring(srcStart, srcEnd);
-                    if (!imgSrc.startsWith("http") && !imgSrc.isEmpty()) {
-                        String normalizedSrc = imgSrc.trim();
-                        
-                        try {
-                            normalizedSrc = java.net.URLDecoder.decode(normalizedSrc, "UTF-8");
-                        } catch (Exception e) {
-                        }
-
-                        File imgFile = resolveImagePath(normalizedSrc, baseDir);
-
-                        if (imgFile != null && imgFile.exists()) {
-                            String imgPath = imgFile.getAbsolutePath();
-                            if (!result.contains(imgPath)) {
-                                result.add(imgPath);
-                            }
-                        }
-                    }
-                }
-            }
-            imgStart = html.toLowerCase().indexOf("<img", imgStart + 4);
-        }
+    private File findFileInExtractionDir(String fileName) {
+        File root = new File(extractionDir);
+        return findFileRecursive(root, fileName);
     }
 
-    private File resolveImagePath(String src, String baseDir) {
-        File imgFile = null;
+    private File findFileRecursive(File dir, String fileName) {
+        if (dir == null || !dir.exists() || !dir.isDirectory()) return null;
 
-        if (src.startsWith("/")) {
-            imgFile = new File(extractionDir, src.substring(1));
-        } else if (src.startsWith("../")) {
-            File base = new File(baseDir);
-            String relativePath = src;
-            while (relativePath.startsWith("../")) {
-                base = base.getParentFile();
-                relativePath = relativePath.substring(3);
-            }
-            imgFile = new File(base, relativePath);
-        } else {
-            imgFile = new File(baseDir, src);
-        }
-
-        if (!imgFile.exists()) {
-            imgFile = new File(extractionDir, src);
-        }
-
-        if (!imgFile.exists() && !src.startsWith("/")) {
-            String[] parts = src.split("/");
-            if (parts.length > 1) {
-                String fileName = parts[parts.length - 1];
-                imgFile = findImageFile(new File(extractionDir), fileName);
-            }
-        }
-
-        return imgFile;
-    }
-
-    private void findAllImages(File dir, List<String> result) {
-        if (dir == null || !dir.exists() || !dir.isDirectory()) return;
-
-        File[] files = dir.listFiles();
-        if (files == null) return;
-
-        java.util.Arrays.sort(files, (a, b) -> {
-            if (a.isDirectory() && b.isDirectory()) {
-                return naturalCompare(a.getName().toLowerCase(), b.getName().toLowerCase());
-            }
-            if (a.isDirectory()) return -1;
-            if (b.isDirectory()) return 1;
-            return compareFileNames(a.getName(), b.getName());
-        });
-
-        for (File file : files) {
-            if (file.isDirectory()) {
-                findAllImages(file, result);
-            } else {
-                String name = file.getName().toLowerCase();
-                if (isImageFile(name) || isImageFileByMagic(file)) {
-                    result.add(file.getAbsolutePath());
-                }
-            }
-        }
-    }
-
-    private int compareFileNames(String nameA, String nameB) {
-        String baseA = nameA.toLowerCase();
-        String baseB = nameB.toLowerCase();
-        
-        boolean hasCoverA = baseA.contains("cover") || baseA.contains("front") || baseA.contains("title");
-        boolean hasCoverB = baseB.contains("cover") || baseB.contains("front") || baseB.contains("title");
-        
-        if (hasCoverA && !hasCoverB) return -1;
-        if (!hasCoverA && hasCoverB) return 1;
-        
-        return naturalCompare(baseA, baseB);
-    }
-
-    private int naturalCompare(String a, String b) {
-        int lenA = a.length();
-        int lenB = b.length();
-        int i = 0, j = 0;
-        
-        while (i < lenA && j < lenB) {
-            char ca = a.charAt(i);
-            char cb = b.charAt(j);
-            
-            if (Character.isDigit(ca) && Character.isDigit(cb)) {
-                int numA = 0, numB = 0;
-                
-                while (i < lenA && Character.isDigit(a.charAt(i))) {
-                    numA = numA * 10 + (a.charAt(i) - '0');
-                    i++;
-                }
-                
-                while (j < lenB && Character.isDigit(b.charAt(j))) {
-                    numB = numB * 10 + (b.charAt(j) - '0');
-                    j++;
-                }
-                
-                if (numA != numB) {
-                    return Integer.compare(numA, numB);
-                }
-            } else {
-                if (ca != cb) {
-                    return Character.compare(ca, cb);
-                }
-                i++;
-                j++;
-            }
-        }
-        
-        return lenA - lenB;
-    }
-
-    private String findCoverImage() {
-        for (String path : imagePaths) {
-            File file = new File(path);
-            String name = file.getName().toLowerCase();
-            if (name.contains("cover") || name.contains("front") || name.contains("title")) {
-                return path;
-            }
-        }
-        return null;
-    }
-
-    private File findImageFile(File dir, String fileName) {
         File[] files = dir.listFiles();
         if (files == null) return null;
+
         for (File file : files) {
             if (file.isDirectory()) {
-                File found = findImageFile(file, fileName);
+                File found = findFileRecursive(file, fileName);
                 if (found != null) return found;
-            } else {
-                if (file.getName().equalsIgnoreCase(fileName)) {
-                    return file;
-                }
+            } else if (file.getName().equalsIgnoreCase(fileName)) {
+                return file;
             }
         }
+
         return null;
     }
 
-    private boolean isImageFile(String fileName) {
-        if (fileName == null) return false;
-        fileName = fileName.toLowerCase();
-        return fileName.endsWith(".jpg") || fileName.endsWith(".jpeg") || 
-               fileName.endsWith(".png") || fileName.endsWith(".gif") || 
-               fileName.endsWith(".webp") || fileName.endsWith(".bmp") ||
-               fileName.endsWith(".tif") || fileName.endsWith(".tiff") ||
-               fileName.endsWith(".svg") || fileName.endsWith(".ico") ||
-               fileName.endsWith(".avif") || fileName.endsWith(".heic") ||
-               fileName.endsWith(".heif") || fileName.endsWith(".jp2") ||
-               fileName.endsWith(".j2k") || fileName.endsWith(".jpf") ||
-               fileName.endsWith(".jpx") || fileName.endsWith(".jpm") ||
-               fileName.endsWith(".mj2") || fileName.endsWith(".wbmp") ||
-               fileName.endsWith(".jpe") || fileName.endsWith(".jfif") ||
-               fileName.endsWith(".pjpeg") || fileName.endsWith(".pjp") ||
-               fileName.endsWith(".apng") || fileName.endsWith(".mng") ||
-               fileName.endsWith(".xbm") || fileName.endsWith(".xpm");
-    }
+    private String fixHtmlContent(String html, String baseDir) {
+        if (html == null) return "";
 
-    private boolean isImageFileByMagic(File file) {
-        if (file == null || !file.exists() || !file.isFile()) return false;
-        
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] header = new byte[12];
-            int bytesRead = fis.read(header);
-            if (bytesRead < 4) return false;
-
-            if (header[0] == (byte)0xFF && header[1] == (byte)0xD8 && header[2] == (byte)0xFF) {
-                return true;
-            }
-
-            if (header[0] == (byte)0x89 && header[1] == (byte)0x50 && 
-                header[2] == (byte)0x4E && header[3] == (byte)0x47) {
-                return true;
-            }
-
-            if (header[0] == (byte)0x47 && header[1] == (byte)0x49 && 
-                header[2] == (byte)0x46 && header[3] == (byte)0x38) {
-                return true;
-            }
-
-            if (header[0] == (byte)0x42 && header[1] == (byte)0x4D) {
-                return true;
-            }
-
-            if (bytesRead >= 12 && 
-                header[0] == 'W' && header[1] == 'E' && header[2] == 'B' && header[3] == 'P') {
-                return true;
-            }
-
-            if (bytesRead >= 4 && 
-                header[0] == 'I' && header[1] == 'I' && 
-                (header[2] == (byte)0x2A || header[2] == (byte)0xBC)) {
-                return true;
-            }
-
-            if (header[0] == '<' && (header[1] == 's' || header[1] == 'S')) {
-                return true;
-            }
-
-            if (bytesRead >= 4 && 
-                (header[0] == (byte)0x00 && header[1] == (byte)0x00 && header[2] == (byte)0x00 && header[3] == (byte)0x0C ||
-                 header[0] == (byte)0x00 && header[1] == (byte)0x00 && header[2] == (byte)0x00 && header[3] == (byte)0x0D)) {
-                return true;
-            }
-
-            if (bytesRead >= 4 && 
-                header[0] == (byte)0x00 && header[1] == (byte)0x00 && header[2] == (byte)0x00 && header[3] == (byte)0x20) {
-                return true;
-            }
-
-            if (bytesRead >= 12 && 
-                header[4] == 'a' && header[5] == 'v' && header[6] == 'i' && header[7] == 'f') {
-                return true;
-            }
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        
-        return false;
-    }
-
-    public String getChapterContent(int chapterIndex) throws IOException {
-        if (!parsed) {
-            parse();
-        }
-
-        if (!imagePaths.isEmpty()) {
-            if (chapterIndex >= 0 && chapterIndex < imagePaths.size()) {
-                String imagePath = imagePaths.get(chapterIndex);
-                return createImagePage(imagePath);
-            }
-        }
-
-        if (!chapterPaths.isEmpty()) {
-            int htmlIndex = chapterIndex;
-            if (!imagePaths.isEmpty()) {
-                htmlIndex = chapterIndex - imagePaths.size();
-            }
-            if (htmlIndex >= 0 && htmlIndex < chapterPaths.size()) {
-                File chapterFile = new File(chapterPaths.get(htmlIndex));
-                if (chapterFile.exists()) {
-                    String content = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(chapterFile.getAbsolutePath())), "UTF-8");
-                    return wrapHtmlContent(content, chapterFile.getParent());
-                }
-            }
-        }
-
-        return "<html><body style='background:#1A1A1A;color:#E0E0E0;padding:16px;'>暂无内容</body></html>";
-    }
-
-    private String wrapHtmlContent(String html, String baseDir) {
         StringBuilder wrapped = new StringBuilder();
         wrapped.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-        wrapped.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">");
+        wrapped.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
+        wrapped.append("<base href=\"file://").append(baseDir).append("/\">");
         wrapped.append("<style>");
         wrapped.append("* { max-width: 100%; }");
-        wrapped.append("body { background-color: #1A1A1A; color: #E0E0E0; padding: 0; margin: 0; line-height: 1.8; font-size: 18px; }");
-        wrapped.append("img { max-width: 100%; height: auto; display: block; margin: 0 auto; }");
-        wrapped.append("p { margin: 0.8em 16px; text-indent: 2em; }");
-        wrapped.append("h1, h2, h3, h4, h5, h6 { color: #FFFFFF; margin: 1.2em 16px 0.6em 16px; }");
+        wrapped.append("body { background-color: #1A1A1A; color: #E0E0E0; padding: 16px; line-height: 1.8; font-size: 18px; margin: 0; word-wrap: break-word; }");
+        wrapped.append("img { max-width: 100%; height: auto; display: block; margin: 16px auto; }");
+        wrapped.append("p { margin: 0.8em 0; text-indent: 2em; }");
+        wrapped.append("h1 { color: #FFFFFF; margin: 1.5em 0 0.8em 0; font-size: 24px; text-indent: 0; border-bottom: 1px solid #333; padding-bottom: 8px; }");
+        wrapped.append("h2 { color: #FFFFFF; margin: 1.2em 0 0.6em 0; font-size: 20px; text-indent: 0; }");
+        wrapped.append("h3 { color: #FFFFFF; margin: 1em 0 0.5em 0; font-size: 18px; text-indent: 0; }");
+        wrapped.append("a { color: #4CAF50; text-decoration: none; }");
+        wrapped.append("a:hover { text-decoration: underline; }");
+        wrapped.append("table { width: 100%; border-collapse: collapse; margin: 16px 0; }");
+        wrapped.append("th, td { border: 1px solid #333; padding: 8px; text-align: left; }");
+        wrapped.append("th { background-color: #222; }");
+        wrapped.append("blockquote { border-left: 4px solid #4CAF50; margin: 16px 0; padding: 8px 16px; color: #AAA; }");
         wrapped.append("</style></head><body>");
 
         String content = html;
@@ -695,6 +664,7 @@ public class EpubParser {
         }
 
         content = fixImagePaths(content, baseDir);
+        content = fixRelativePaths(content, baseDir);
         wrapped.append(content);
 
         wrapped.append("</body></html>");
@@ -702,111 +672,172 @@ public class EpubParser {
     }
 
     private String fixImagePaths(String html, String baseDir) {
+        return fixRelativePaths(html, baseDir);
+    }
+
+    private String fixRelativePaths(String html, String baseDir) {
         if (html == null || html.isEmpty()) return html;
 
-        StringBuilder result = new StringBuilder();
-        int imgStart = html.toLowerCase().indexOf("<img");
-        int lastIndex = 0;
+        String fileBase = "file://" + baseDir + "/";
 
-        while (imgStart >= 0) {
-            result.append(html.substring(lastIndex, imgStart));
+        html = html.replaceAll("src=\"([^\"]+)\"", "src=\"" + fileBase + "$1\"");
+        html = html.replaceAll("src='([^']+)'", "src='" + fileBase + "$1'");
+        html = html.replaceAll("url\\(([^)]+)\\)", "url(" + fileBase + "$1)");
 
-            int srcStart = html.indexOf("src=", imgStart);
-            int srcEnd = imgStart;
-            if (srcStart >= 0) {
-                srcStart += 4;
-                while (srcStart < html.length() && (html.charAt(srcStart) == '\"' || html.charAt(srcStart) == '\'' || html.charAt(srcStart) == ' ')) {
-                    srcStart++;
-                }
-                srcEnd = srcStart;
-                while (srcEnd < html.length() && html.charAt(srcEnd) != '\"' && html.charAt(srcEnd) != '\'' && html.charAt(srcEnd) != ' ' && html.charAt(srcEnd) != '>') {
-                    srcEnd++;
-                }
+        html = html.replaceAll("href=\"([^\"#][^\"]*)\"", "href=\"" + fileBase + "$1\"");
+        html = html.replaceAll("href='([^'#][^']*)'", "href='" + fileBase + "$1'");
 
-                if (srcEnd > srcStart) {
-                    String imgSrc = html.substring(srcStart, srcEnd);
-                    if (!imgSrc.startsWith("http") && !imgSrc.startsWith("file://") && !imgSrc.isEmpty()) {
-                        String normalizedSrc = imgSrc.trim();
-                        File imgFile = null;
+        html = html.replaceAll("src=\"file://[^/]+//", "src=\"file://");
+        html = html.replaceAll("href=\"file://[^/]+//", "href=\"file://");
 
-                        if (normalizedSrc.startsWith("/")) {
-                            normalizedSrc = normalizedSrc.substring(1);
-                            imgFile = new File(extractionDir, normalizedSrc);
-                        } else {
-                            imgFile = new File(baseDir, normalizedSrc);
-                        }
+        return html;
+    }
 
-                        if (!imgFile.exists()) {
-                            imgFile = new File(extractionDir, normalizedSrc);
-                        }
+    private String extractCover(Map<String, String> manifest, Map<String, String> manifestMediaType, String opfDir) {
+        for (Map.Entry<String, String> entry : manifest.entrySet()) {
+            String id = entry.getKey();
+            String href = entry.getValue();
+            String mediaType = manifestMediaType.get(id);
 
-                        if (!imgFile.exists()) {
-                            String[] parts = normalizedSrc.split("/");
-                            if (parts.length > 1) {
-                                String fileName = parts[parts.length - 1];
-                                imgFile = findImageFile(new File(extractionDir), fileName);
-                            }
-                        }
-
-                        if (imgFile != null && imgFile.exists()) {
-                            String newSrc = "file://" + imgFile.getAbsolutePath();
-                            result.append(html.substring(imgStart, srcStart)).append(newSrc);
-                        } else {
-                            result.append(html.substring(imgStart, srcEnd));
-                        }
-                    } else {
-                        result.append(html.substring(imgStart, srcEnd));
+            if (mediaType != null && mediaType.startsWith("image/")) {
+                if (id.toLowerCase().contains("cover") || href.toLowerCase().contains("cover")) {
+                    File coverFile = new File(opfDir, href);
+                    if (!coverFile.exists()) {
+                        coverFile = new File(extractionDir, href);
                     }
-                } else {
-                    result.append(html.substring(imgStart));
-                    srcEnd = html.length();
+                    if (coverFile.exists()) {
+                        return coverFile.getAbsolutePath();
+                    }
                 }
-            } else {
-                result.append(html.substring(imgStart));
-                srcEnd = html.length();
-            }
-
-            lastIndex = srcEnd;
-            imgStart = html.toLowerCase().indexOf("<img", lastIndex);
-        }
-
-        result.append(html.substring(lastIndex));
-        return result.toString();
-    }
-
-    private String createImagePage(String imagePath) {
-        StringBuilder html = new StringBuilder();
-        html.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-        html.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">");
-        html.append("<style>");
-        html.append("body { background-color: #1A1A1A; margin: 0; padding: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }");
-        html.append("img { max-width: 100%; max-height: 100vh; display: block; }");
-        html.append("</style></head><body>");
-        html.append("<img src=\"file://").append(imagePath).append("\">");
-        html.append("</body></html>");
-        return html.toString();
-    }
-
-    public String getChapterUrl(int chapterIndex) {
-        if (!parsed) {
-            try {
-                parse();
-            } catch (IOException e) {
-                e.printStackTrace();
-                return null;
             }
         }
 
-        if (!chapterPaths.isEmpty()) {
-            if (chapterIndex >= 0 && chapterIndex < chapterPaths.size()) {
-                return "file://" + chapterPaths.get(chapterIndex);
+        File imgDir = new File(extractionDir, "images");
+        if (!imgDir.exists()) {
+            imgDir = new File(extractionDir, "Images");
+        }
+        if (!imgDir.exists()) {
+            imgDir = new File(extractionDir, "IMG");
+        }
+
+        if (imgDir.exists() && imgDir.isDirectory()) {
+            File[] images = imgDir.listFiles();
+            if (images != null && images.length > 0) {
+                for (File img : images) {
+                    if (img.getName().toLowerCase().contains("cover")) {
+                        return img.getAbsolutePath();
+                    }
+                }
+                return images[0].getAbsolutePath();
             }
         }
 
         return null;
     }
 
-    public List<String> getImagePaths() {
+    public String getChapterContent(int chapterIndex) throws IOException {
+        if (!parsed) {
+            parse();
+        }
+
+        if (chapterIndex < 0 || chapterIndex >= chapters.size()) {
+            return createEmptyPage("暂无内容");
+        }
+
+        Chapter chapter = chapters.get(chapterIndex);
+        if (chapter.content != null && !chapter.content.isEmpty()) {
+            return chapter.content;
+        }
+
+        return createEmptyPage("章节内容加载失败");
+    }
+
+    public String getFullContent() throws IOException {
+        if (!parsed) {
+            parse();
+        }
+
+        if (chapters.isEmpty()) {
+            return createEmptyPage("暂无内容");
+        }
+
+        StringBuilder fullContent = new StringBuilder();
+        fullContent.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
+        fullContent.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
+        fullContent.append("<style>");
+        fullContent.append("* { max-width: 100%; }");
+        fullContent.append("body { background-color: #1A1A1A; color: #E0E0E0; padding: 16px; line-height: 1.8; font-size: 18px; margin: 0; word-wrap: break-word; }");
+        fullContent.append("img { max-width: 100%; height: auto; display: block; margin: 16px auto; }");
+        fullContent.append("p { margin: 0.8em 0; text-indent: 2em; }");
+        fullContent.append("h1 { color: #FFFFFF; margin: 1.5em 0 0.8em 0; font-size: 24px; text-indent: 0; border-bottom: 1px solid #333; padding-bottom: 8px; }");
+        fullContent.append("h2 { color: #FFFFFF; margin: 1.2em 0 0.6em 0; font-size: 20px; text-indent: 0; }");
+        fullContent.append("h3 { color: #FFFFFF; margin: 1em 0 0.5em 0; font-size: 18px; text-indent: 0; }");
+        fullContent.append("a { color: #4CAF50; text-decoration: none; }");
+        fullContent.append("a:hover { text-decoration: underline; }");
+        fullContent.append("table { width: 100%; border-collapse: collapse; margin: 16px 0; }");
+        fullContent.append("th, td { border: 1px solid #333; padding: 8px; text-align: left; }");
+        fullContent.append("th { background-color: #222; }");
+        fullContent.append("blockquote { border-left: 4px solid #4CAF50; margin: 16px 0; padding: 8px 16px; color: #AAA; }");
+        fullContent.append(".chapter-break { page-break-before: always; margin-top: 40px; }");
+        fullContent.append("</style></head><body>");
+
+        String baseDir = "";
+        if (!chapters.isEmpty()) {
+            baseDir = chapters.get(0).href.contains("/") 
+                ? extractionDir + "/" + chapters.get(0).href.substring(0, chapters.get(0).href.lastIndexOf("/"))
+                : extractionDir;
+        }
+
+        for (int i = 0; i < chapters.size(); i++) {
+            Chapter chapter = chapters.get(i);
+            
+            fullContent.append("<div id=\"chapter_").append(i).append("\">");
+            
+            if (i > 0) {
+                fullContent.append("<div style=\"height:40px;\"></div>");
+            }
+            
+            if (chapter.title != null && !chapter.title.isEmpty()) {
+                fullContent.append("<h1>").append(chapter.title).append("</h1>");
+            }
+            
+            if (chapter.content != null && !chapter.content.isEmpty()) {
+                String chapterBody = extractBodyContent(chapter.content);
+                String fixedContent = fixRelativePaths(chapterBody, baseDir);
+                fullContent.append(fixedContent);
+            }
+            
+            fullContent.append("</div>");
+        }
+
+        fullContent.append("</body></html>");
+        return fullContent.toString();
+    }
+
+    private String extractBodyContent(String html) {
+        if (html == null) return "";
+        
+        int bodyStart = html.toLowerCase().indexOf("<body");
+        if (bodyStart >= 0) {
+            int bodyEnd = html.indexOf(">", bodyStart);
+            if (bodyEnd >= 0) {
+                int bodyClose = html.toLowerCase().indexOf("</body>", bodyEnd);
+                if (bodyClose >= 0) {
+                    return html.substring(bodyEnd + 1, bodyClose);
+                } else {
+                    return html.substring(bodyEnd + 1);
+                }
+            }
+        }
+        
+        return html;
+    }
+
+    private String createEmptyPage(String message) {
+        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><style>body { background-color: #1A1A1A; color: #E0E0E0; padding: 16px; text-align: center; }</style></head><body>" + message + "</body></html>";
+    }
+
+    public List<TocItem> getToc() {
         if (!parsed) {
             try {
                 parse();
@@ -814,13 +845,25 @@ public class EpubParser {
                 e.printStackTrace();
             }
         }
-        return imagePaths;
+        return toc;
+    }
+
+    public List<Chapter> getChapters() {
+        if (!parsed) {
+            try {
+                parse();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        return chapters;
     }
 
     public static class EpubInfo {
         public String title = "";
         public String author = "";
         public String coverPath = null;
+        public String coverId = null;
         public int totalPages = 0;
     }
 }
